@@ -288,14 +288,71 @@ button:focus-visible {
 
 #hint {
   position: absolute;
-  left: 20px;
-  bottom: 156px;
-  max-width: 280px;
-  color: white;
-  font-size: 13px;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: max-content;
+  max-width: min(320px, calc(100% - 300px));
+  pointer-events: none;
+}
+
+#hint-toggle {
+  pointer-events: auto;
+  padding: 3px 10px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  border-width: 2px;
+  border-radius: 999px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+#hint-mark::before { content: "–"; }
+
+#hint-panel {
+  width: 300px;
+  max-width: 100%;
+  color: var(--ink);
+  background: var(--paper);
+  border: 3px solid var(--ink);
+  border-radius: 14px;
+  padding: 8px 10px 7px;
+  box-shadow: 0 3px 0 var(--ink);
+}
+
+.keygrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 12px;
+  font-size: 12px;
   font-weight: 500;
-  text-shadow: 0 2px 0 var(--ink);
-  opacity: 0.9;
+  line-height: 1.25;
+  text-align: left;
+}
+
+.keygrid b {
+  font-weight: 700;
+}
+
+#hint-status {
+  margin: 6px 0 0;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+}
+
+#hint.is-min #hint-panel { display: none; }
+
+#hint.is-min #hint-mark::before { content: "+"; }
+
+@media (max-width: 860px) {
+  #hint:not(.is-open) #hint-panel { display: none; }
+  #hint:not(.is-open) #hint-mark::before { content: "+"; }
 }
 
 #trap-banner, #max-banner, #callout {
@@ -396,10 +453,9 @@ button:focus-visible {
   height: 124px;
   border-radius: 50%;
   background: var(--coral);
-  color: white;
+  color: var(--ink);
   font-size: 22px;
   letter-spacing: 0.06em;
-  text-shadow: 0 2px 0 var(--ink);
 }
 
 #btn-flail.held { background: #ff3355; }
@@ -531,16 +587,24 @@ h1 {
   to { transform: translateX(16px); opacity: 0; }
 }
 
+@media (max-width: 1100px) {
+  #hint {
+    bottom: 150px;
+    max-width: min(240px, calc(100% - 28px));
+  }
+  #hint-panel { width: 240px; padding: 6px 8px; }
+  .keygrid { font-size: 11px; gap: 2px 8px; }
+}
+
 @media (max-width: 860px) {
   #scoreboard { top: 62px; }
   #score { font-size: 36px; }
-  #hint { display: none; }
   #chaos-meter { height: 150px; }
   h1 { font-size: 32px; }
 }
 
 @media (max-width: 560px) {
-  #badges { bottom: 156px; }
+  #badges { bottom: 196px; }
   #controls { max-width: 58vw; }
   #logo { font-size: 16px; }
   #stick, #btn-flail { width: 104px; height: 104px; }

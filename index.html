@@ -42,7 +42,32 @@
       <div id="badges"></div>
       <div id="toasts"></div>
       <div id="popups"></div>
-      <div id="hint">WASD walk · arrows look · SPACE jump · bright doors open into toy rooms</div>
+      <div id="hint">
+        <button type="button" id="hint-toggle" aria-expanded="true" aria-controls="hint-panel">
+          CONTROLS <span id="hint-mark" aria-hidden="true"></span>
+        </button>
+        <div id="hint-panel">
+          <div class="keygrid">
+            <span><b>WASD</b> walk</span>
+            <span><b>Stick</b> walk</span>
+            <span><b>Arrows</b> look</span>
+            <span><b>Drag</b> look</span>
+            <span><b>Space</b> jump</span>
+            <span><b>JUMP</b> jump</span>
+            <span><b>E</b> smash</span>
+            <span><b>SWING</b> smash</span>
+            <span><b>F</b> flail</span>
+            <span><b>Y</b> drop</span>
+            <span><b>T</b> toys</span>
+            <span><b>R</b> reset</span>
+            <span><b>G</b> gravity</span>
+            <span><b>M</b> sound</span>
+            <span><b>Wheel</b> zoom</span>
+            <span><b>Esc</b> menu</span>
+          </div>
+          <p id="hint-status" hidden></p>
+        </div>
+      </div>
       <div id="trap-banner" hidden>
         <div>MASH TO BREAK FREE!</div>
         <div id="trap-meter"><div id="trap-fill"></div></div>

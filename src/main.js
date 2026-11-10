@@ -293,6 +293,38 @@ const maxBanner = document.querySelector('#max-banner');
 const calloutEl = document.querySelector('#callout');
 const splash = document.querySelector('#splash');
 const hintEl = document.querySelector('#hint');
+const hintStatus = document.querySelector('#hint-status');
+const hintToggle = document.querySelector('#hint-toggle');
+const HINT_MIN_KEY = 'ragdoll-controls-min';
+
+function setHint(line) {
+  const text = line || '';
+  hintStatus.textContent = text;
+  hintStatus.hidden = !text;
+}
+
+function hintIsMin() {
+  if (hintEl.classList.contains('is-min')) return true;
+  if (hintEl.classList.contains('is-open')) return false;
+  return window.matchMedia('(max-width: 860px)').matches;
+}
+
+function applyHintMin(min, persist) {
+  hintEl.classList.toggle('is-min', min);
+  hintEl.classList.toggle('is-open', !min);
+  hintToggle.setAttribute('aria-expanded', min ? 'false' : 'true');
+  if (!persist) return;
+  try { sessionStorage.setItem(HINT_MIN_KEY, min ? '1' : '0'); } catch { /* private mode */ }
+}
+
+try {
+  const saved = sessionStorage.getItem(HINT_MIN_KEY);
+  const narrow = window.matchMedia('(max-width: 860px)').matches;
+  applyHintMin(saved === '1' || (saved !== '0' && narrow), false);
+} catch {
+  applyHintMin(window.matchMedia('(max-width: 860px)').matches, false);
+}
+hintToggle.addEventListener('click', () => applyHintMin(!hintIsMin(), true));
 const gravBtn = document.querySelector('#btn-grav');
 const muteBtn = document.querySelector('#btn-mute');
 
@@ -1398,7 +1430,7 @@ function launchLevel() {
       pitch = 0.62;
       distance = 18;
       logoSub.textContent = 'STAIR FALL';
-      hintEl.textContent = 'WASD steer · arrows look · SPACE jump · F flail';
+      setHint('');
       flailBtn.textContent = 'FLAIL';
       callout('DOWN!');
     } else {
@@ -1406,7 +1438,7 @@ function launchLevel() {
       pitch = 0.82;
       distance = 13;
       logoSub.textContent = 'SKY STAIRS';
-      hintEl.textContent = 'WASD steer · arrows look · SPACE jump · F flail';
+      setHint('');
       flailBtn.textContent = 'FLAIL';
       callout('FALL!');
     }
@@ -1456,7 +1488,7 @@ function launchLevel() {
     distance = 8.4;
     panX = panY = panZ = 0;
     logoSub.textContent = 'PLAYGROUND';
-    hintEl.textContent = 'WASD steer · arrows look · SPACE jump · F flail · drag to orbit';
+    setHint('Drag the scene to orbit');
     flailBtn.textContent = 'FLAIL';
     dropEl.hidden = true;
     callout('GO!');
@@ -1520,28 +1552,21 @@ function arrive(gate) {
 }
 
 function streetHint() {
+  let line = 'Bright doors open · green EXIT lets you out';
   if (streets.indoor()) {
-    hintEl.textContent = 'INSIDE · smack the toys, they smack back · walk out the green EXIT · SPACE stands you up';
-    return;
+    line = 'Inside · green EXIT lets you out';
+  } else {
+    const heat = streets.heat();
+    if (heat === 'ride') line = 'Busted · police are driving you in';
+    else if (heat === 'cell') line = 'Cell · swing at the bars to get out';
+    else if (heat === 'wanted') line = 'Wanted · police are coming';
+    else {
+      const weapon = streets.weaponLabel();
+      const blurb = streets.weaponBlurb();
+      if (weapon) line = `${weapon} · ${blurb} · Y drops it`;
+    }
   }
-  const heat = streets.heat();
-  if (heat === 'ride') {
-    hintEl.textContent = 'BUSTED · sit tight, the police are driving you to jail';
-    return;
-  }
-  if (heat === 'cell') {
-    hintEl.textContent = 'CELL · push into a row of bars, or swing the bunk, stool, or pipe at them, then walk out';
-    return;
-  }
-  if (heat === 'wanted') {
-    hintEl.textContent = 'WANTED · the police are coming to take you in';
-    return;
-  }
-  const weapon = streets.weaponLabel();
-  const blurb = streets.weaponBlurb();
-  hintEl.textContent = weapon
-    ? `${weapon} · ${blurb} · WASD walk · E or ? smash · Y put down · bright doors open`
-    : 'Walk into a bright door · the room is full of toys that knock you around · green EXIT lets you out';
+  setHint(line);
 }
 
 function onStreetEvent(e) {
@@ -2018,6 +2043,3 @@ try {
   }
 } catch { /* private mode */ }
 
-window.setTimeout(() => {
-  if (hintEl) hintEl.style.opacity = '0.55';
-}, 14000);
