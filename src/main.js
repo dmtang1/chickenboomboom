@@ -29,7 +29,7 @@ const renderer = new THREE.WebGLRenderer({
   powerPreference: 'high-performance',
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
-renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setSize(window.innerWidth, window.innerHeight, false);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -306,7 +306,7 @@ function setHint(line) {
 function hintIsMin() {
   if (hintEl.classList.contains('is-min')) return true;
   if (hintEl.classList.contains('is-open')) return false;
-  return window.matchMedia('(max-width: 860px)').matches;
+  return true;
 }
 
 function applyHintMin(min, persist) {
@@ -319,12 +319,30 @@ function applyHintMin(min, persist) {
 
 try {
   const saved = sessionStorage.getItem(HINT_MIN_KEY);
-  const narrow = window.matchMedia('(max-width: 860px)').matches;
-  applyHintMin(saved === '1' || (saved !== '0' && narrow), false);
+  applyHintMin(saved !== '0', false);
 } catch {
-  applyHintMin(window.matchMedia('(max-width: 860px)').matches, false);
+  applyHintMin(true, false);
 }
 hintToggle.addEventListener('click', () => applyHintMin(!hintIsMin(), true));
+
+const settingsEl = document.querySelector('#settings');
+const settingsBtn = document.querySelector('#btn-settings');
+const settingsPanel = document.querySelector('#settings-panel');
+
+function setSettingsOpen(open) {
+  settingsPanel.hidden = !open;
+  settingsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+settingsBtn.addEventListener('click', () => {
+  setSettingsOpen(settingsPanel.hidden);
+  sfx.ui();
+});
+document.addEventListener('pointerdown', (e) => {
+  if (settingsPanel.hidden || settingsEl.contains(e.target)) return;
+  setSettingsOpen(false);
+});
+
 const gravBtn = document.querySelector('#btn-grav');
 const muteBtn = document.querySelector('#btn-mute');
 
@@ -442,6 +460,10 @@ stick.addEventListener('pointercancel', endStick);
 
 const pointers = new Map();
 let pinchPrev = 0;
+let lastPointerType = 'mouse';
+window.addEventListener('pointerdown', (e) => {
+  lastPointerType = e.pointerType || 'mouse';
+}, true);
 canvas.addEventListener('pointerdown', (e) => {
   if (!started) return;
   canvas.setPointerCapture(e.pointerId);
@@ -501,12 +523,25 @@ canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   distance = clamp(distance + e.deltaY * 0.008, 3.4, 30);
 }, { passive: false });
-canvas.addEventListener('dblclick', () => {
+canvas.addEventListener('dblclick', (e) => {
+  if (lastPointerType === 'touch') {
+    e.preventDefault();
+    return;
+  }
   yaw = 0.55;
   pitch = 0.46;
   distance = 8.4;
   panX = panY = panZ = 0;
 });
+
+document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
+document.addEventListener('gesturechange', (e) => e.preventDefault(), { passive: false });
+let lastTouchEnd = 0;
+document.addEventListener('touchend', (e) => {
+  const now = performance.now();
+  if (now - lastTouchEnd < 320) e.preventDefault();
+  lastTouchEnd = now;
+}, { passive: false });
 
 window.addEventListener('keydown', (e) => {
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
@@ -557,11 +592,21 @@ window.addEventListener('blur', () => {
   releaseJump();
   endStick();
 });
-window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+function fitView() {
+  canvas.style.width = '';
+  canvas.style.height = '';
+  const w = canvas.clientWidth || window.innerWidth;
+  const h = canvas.clientHeight || window.innerHeight;
+  if (w < 2 || h < 2) return;
+  camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
+  renderer.setSize(w, h, false);
+}
+fitView();
+window.addEventListener('resize', fitView);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', fitView);
+}
 
 let last = performance.now();
 let fpsAccum = 0;
@@ -1560,11 +1605,6 @@ function streetHint() {
     if (heat === 'ride') line = 'Busted · police are driving you in';
     else if (heat === 'cell') line = 'Cell · swing at the bars to get out';
     else if (heat === 'wanted') line = 'Wanted · police are coming';
-    else {
-      const weapon = streets.weaponLabel();
-      const blurb = streets.weaponBlurb();
-      if (weapon) line = `${weapon} · ${blurb} · Y drops it`;
-    }
   }
   setHint(line);
 }

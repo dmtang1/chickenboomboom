@@ -9,7 +9,7 @@
         }
       } catch (e) {}
     </script>
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#7ec8ff" />
     <title>Chicken Boom Boom</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%23ff5d73'/%3E%3Ccircle cx='24' cy='28' r='4' fill='%23fff'/%3E%3Ccircle cx='40' cy='28' r='4' fill='%23fff'/%3E%3Cpath d='M22 40c4 6 16 6 20 0' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E" />
@@ -30,9 +30,14 @@
       </div>
       <div id="controls">
         <button type="button" id="btn-toys" title="Drop a pile of toys (T)">TOYS</button>
-        <button type="button" id="btn-reset" title="Reset the ragdoll (R)">RESET</button>
-        <button type="button" id="btn-grav" title="Toggle gravity (G)">GRAVITY ON</button>
-        <button type="button" id="btn-mute" title="Mute (M)">SOUND ON</button>
+        <div id="settings">
+          <button type="button" id="btn-settings" aria-expanded="false" aria-controls="settings-panel">SETTINGS</button>
+          <div id="settings-panel" hidden>
+            <button type="button" id="btn-reset" title="Reset the ragdoll (R)">RESET</button>
+            <button type="button" id="btn-grav" title="Toggle gravity (G)">GRAVITY ON</button>
+            <button type="button" id="btn-mute" title="Mute (M)">SOUND ON</button>
+          </div>
+        </div>
       </div>
       <div id="chaos-wrap">
         <div id="chaos-label">CHAOS</div>
@@ -42,20 +47,16 @@
       <div id="badges"></div>
       <div id="toasts"></div>
       <div id="popups"></div>
-      <div id="hint">
-        <button type="button" id="hint-toggle" aria-expanded="true" aria-controls="hint-panel">
+      <div id="hint" class="is-min">
+        <button type="button" id="hint-toggle" aria-expanded="false" aria-controls="hint-panel">
           CONTROLS <span id="hint-mark" aria-hidden="true"></span>
         </button>
         <div id="hint-panel">
           <div class="keygrid">
             <span><b>WASD</b> walk</span>
-            <span><b>Stick</b> walk</span>
             <span><b>Arrows</b> look</span>
-            <span><b>Drag</b> look</span>
             <span><b>Space</b> jump</span>
-            <span><b>JUMP</b> jump</span>
             <span><b>E</b> smash</span>
-            <span><b>SWING</b> smash</span>
             <span><b>F</b> flail</span>
             <span><b>Y</b> drop</span>
             <span><b>T</b> toys</span>
