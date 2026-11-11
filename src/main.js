@@ -461,9 +461,16 @@ stick.addEventListener('pointercancel', endStick);
 const pointers = new Map();
 let pinchPrev = 0;
 let lastPointerType = 'mouse';
+const touchDevice = (navigator.maxTouchPoints || 0) > 0
+  || window.matchMedia('(any-pointer: coarse)').matches;
 window.addEventListener('pointerdown', (e) => {
   lastPointerType = e.pointerType || 'mouse';
 }, true);
+function blockDoubleTapZoom(e) {
+  if (!touchDevice && lastPointerType !== 'touch' && lastPointerType !== 'pen') return false;
+  e.preventDefault();
+  return true;
+}
 canvas.addEventListener('pointerdown', (e) => {
   if (!started) return;
   canvas.setPointerCapture(e.pointerId);
@@ -524,24 +531,24 @@ canvas.addEventListener('wheel', (e) => {
   distance = clamp(distance + e.deltaY * 0.008, 3.4, 30);
 }, { passive: false });
 canvas.addEventListener('dblclick', (e) => {
-  if (lastPointerType === 'touch') {
-    e.preventDefault();
-    return;
-  }
+  if (blockDoubleTapZoom(e)) return;
   yaw = 0.55;
   pitch = 0.46;
   distance = 8.4;
   panX = panY = panZ = 0;
 });
+document.addEventListener('dblclick', (e) => {
+  blockDoubleTapZoom(e);
+}, true);
 
 document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });
 document.addEventListener('gesturechange', (e) => e.preventDefault(), { passive: false });
 let lastTouchEnd = 0;
 document.addEventListener('touchend', (e) => {
   const now = performance.now();
-  if (now - lastTouchEnd < 320) e.preventDefault();
+  if (now - lastTouchEnd < 500) e.preventDefault();
   lastTouchEnd = now;
-}, { passive: false });
+}, { passive: false, capture: true });
 
 window.addEventListener('keydown', (e) => {
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
