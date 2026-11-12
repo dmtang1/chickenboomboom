@@ -1795,6 +1795,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function smack(car, hitBody) {
+    if (car.driven) return;
     if (car.pursuit) {
       tryGrab(car);
       return;
@@ -2105,10 +2106,15 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function removeCar(car) {
     const riding = bust && bust.phase === 'ride' && bust.car === car;
+    const stolen = ride === car;
     removeBody(car.body);
     car.mesh.removeFromParent();
     const index = cars.indexOf(car);
     if (index >= 0) cars.splice(index, 1);
+    if (stolen) {
+      ride = null;
+      if (ragdoll.walking()) freeMover();
+    }
     if (riding) spill('BAIL!');
   }
 
@@ -2198,6 +2204,472 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.body.velocity.set(Math.sin(car.yaw) * CRAZY_SPEED, 0, Math.cos(car.yaw) * CRAZY_SPEED);
     car.body.angularVelocity.set(0, 0, 0);
     car.body.wakeUp();
+  }
+
+  let ride = null;
+  let gas = 0;
+  let wheel = 0;
+  let offer = false;
+
+  function tune(kind) {
+    const bulk = kind.w * kind.h * kind.d;
+    const heft = Math.min(1, Math.max(0, (bulk - 8.5) / 48));
+    const sport = kind.id === 'sport' ? 1 : kind.id === 'police' ? 0.35 : kind.id === 'taxi' ? 0.2 : 0;
+    return {
+      top: 27 - heft * 14 + sport * 9,
+      reverse: 10 - heft * 4.5,
+      accel: 24 - heft * 12 + sport * 10,
+      turn: 1.9 - heft * 0.85 + sport * 0.55,
+      ram: 0.7 + heft * 1.65 - sport * 0.22,
+    };
+  }
+
+  function carPose(car) {
+    if (car.rogue || car.driven || car.loose) return { x: car.px, z: car.pz, yaw: car.yaw };
+    const spot = centerOf(car);
+    return { x: spot.x, z: spot.z, yaw: yawOf(car) };
+  }
+
+  function carLocal(px, pz, car) {
+    const pose = carPose(car);
+    const dx = px - pose.x;
+    const dz = pz - pose.z;
+    return {
+      x: dx * Math.cos(pose.yaw) - dz * Math.sin(pose.yaw),
+      z: dx * Math.sin(pose.yaw) + dz * Math.cos(pose.yaw),
+      pose,
+    };
+  }
+
+  function gapToCar(px, pz, car) {
+    const local = carLocal(px, pz, car);
+    const ox = Math.max(Math.abs(local.x) - car.kind.w / 2, 0);
+    const oz = Math.max(Math.abs(local.z) - car.kind.d / 2, 0);
+    return Math.hypot(ox, oz);
+  }
+
+  function closestCar(maxGap) {
+    if (!ragdoll.walking()) return null;
+    const spot = ragdoll.mover().position;
+    let best = null;
+    let bestGap = maxGap;
+    for (const car of cars) {
+      if (car.driven || car.pursuit) continue;
+      if (Math.abs(spot.y - car.ride) > 2.3) continue;
+      const gap = gapToCar(spot.x, spot.z, car);
+      if (gap < bestGap) {
+        bestGap = gap;
+        best = car;
+      }
+    }
+    return best;
+  }
+
+  function roofCar() {
+    if (!ragdoll.walking()) return null;
+    const spot = ragdoll.mover();
+    if (spot.velocity.y > 0.35) return null;
+    for (const car of cars) {
+      if (car.driven || car.pursuit) continue;
+      const local = carLocal(spot.position.x, spot.position.z, car);
+      if (Math.abs(local.x) > car.kind.w * 0.46) continue;
+      if (Math.abs(local.z) > car.kind.d * 0.46) continue;
+      const roof = car.ride + car.kind.h * 0.5;
+      if (spot.position.y < roof + 0.05 || spot.position.y > roof + 1.35) continue;
+      return car;
+    }
+    return null;
+  }
+
+  function solidBoxes() {
+    const boxes = [];
+    for (const tile of tiles) {
+      if (!tile.props) continue;
+      const ox = shiftX + tile.gx * CELL;
+      const oz = shiftZ + tile.gz * CELL;
+      for (const prop of tile.props) {
+        if (prop.kind !== 'building') continue;
+        boxes.push({
+          minX: ox + prop.lx - prop.hx,
+          maxX: ox + prop.lx + prop.hx,
+          minZ: oz + prop.lz - prop.hz,
+          maxZ: oz + prop.lz + prop.hz,
+        });
+      }
+    }
+    if (jail && !jail.open) {
+      boxes.push({
+        minX: jail.cx - jail.halfX,
+        maxX: jail.cx + jail.halfX,
+        minZ: jail.cz - jail.halfZ,
+        maxZ: jail.cz + jail.halfZ,
+      });
+    }
+    return boxes;
+  }
+
+  function pointBlocked(x, z, pad, boxes) {
+    for (const box of boxes) {
+      if (x > box.minX - pad && x < box.maxX + pad && z > box.minZ - pad && z < box.maxZ + pad) return true;
+    }
+    return false;
+  }
+
+  function buildingNudge(x, z, yaw, kind) {
+    const boxes = solidBoxes();
+    const hw = kind.w * 0.46;
+    const hd = kind.d * 0.48;
+    const fx = Math.sin(yaw);
+    const fz = Math.cos(yaw);
+    const rx = Math.cos(yaw);
+    const rz = -Math.sin(yaw);
+    let px = 0;
+    let pz = 0;
+    const corners = [[hd, hw], [hd, -hw], [-hd, hw], [-hd, -hw], [hd * 0.15, 0]];
+    for (const [lz, lx] of corners) {
+      const sx = x + fx * lz + rx * lx;
+      const sz = z + fz * lz + rz * lx;
+      for (const box of boxes) {
+        if (sx <= box.minX || sx >= box.maxX || sz <= box.minZ || sz >= box.maxZ) continue;
+        const left = sx - box.minX;
+        const right = box.maxX - sx;
+        const front = sz - box.minZ;
+        const back = box.maxZ - sz;
+        const m = Math.min(left, right, front, back);
+        if (m === left) px = Math.min(px, -(left + 0.08));
+        else if (m === right) px = Math.max(px, right + 0.08);
+        else if (m === front) pz = Math.min(pz, -(front + 0.08));
+        else pz = Math.max(pz, back + 0.08);
+      }
+    }
+    return { x: px, z: pz };
+  }
+
+  function carAABB(car) {
+    const pose = carPose(car);
+    const fx = Math.abs(Math.sin(pose.yaw));
+    const fz = Math.abs(Math.cos(pose.yaw));
+    const hx = car.kind.d / 2 * fx + car.kind.w / 2 * fz;
+    const hz = car.kind.d / 2 * fz + car.kind.w / 2 * fx;
+    return {
+      minX: pose.x - hx,
+      maxX: pose.x + hx,
+      minZ: pose.z - hz,
+      maxZ: pose.z + hz,
+      x: pose.x,
+      z: pose.z,
+    };
+  }
+
+  function shoveTraffic(car) {
+    const mine = carAABB(car);
+    const now = performance.now();
+    for (const other of cars) {
+      if (other === car || other.driven) continue;
+      const box = carAABB(other);
+      const overlapX = Math.min(mine.maxX, box.maxX) - Math.max(mine.minX, box.minX);
+      const overlapZ = Math.min(mine.maxZ, box.maxZ) - Math.max(mine.minZ, box.minZ);
+      if (overlapX <= 0 || overlapZ <= 0) continue;
+      const dx = mine.x - box.x;
+      const dz = mine.z - box.z;
+      const len = Math.hypot(dx, dz) || 1;
+      const push = Math.min(overlapX, overlapZ) * 0.65 + 0.12;
+      const nx = dx / len;
+      const nz = dz / len;
+      car.px += nx * push;
+      car.pz += nz * push;
+      if (other.rogue) {
+        other.px -= nx * push * 0.65;
+        other.pz -= nz * push * 0.65;
+        other.body.position.set(other.px, other.ride, other.pz);
+      } else if (other.axis === 'z') {
+        other.travel -= nz * push;
+        syncCar(other);
+      } else {
+        other.travel -= nx * push;
+        syncCar(other);
+      }
+      if (Math.abs(car.speed) > 5 && now > (car.bumpAt || 0)) {
+        car.bumpAt = now + 380;
+        car.speed *= 0.62;
+        car.hop = Math.max(car.hop || 0, 0.22);
+        const words = ['CRUNCH!', 'FENDER!', 'BAM!', 'HONK!'];
+        onEvent({
+          callout: words[(Math.random() * words.length) | 0],
+          honk: true,
+          shake: 0.18,
+          crunch: true,
+          impact: 8,
+          score: 18,
+          pos: { x: (mine.x + box.x) / 2, y: car.ride + 0.5, z: (mine.z + box.z) / 2 },
+          burst: 'chip',
+        });
+      }
+      mine.x = car.px;
+      mine.z = car.pz;
+      mine.minX += nx * push;
+      mine.maxX += nx * push;
+      mine.minZ += nz * push;
+      mine.maxZ += nz * push;
+    }
+  }
+
+  function overlapsCar(car, wx, wz, radius) {
+    const local = carLocal(wx, wz, car);
+    const ox = Math.max(Math.abs(local.x) - car.kind.w * 0.5, 0);
+    const oz = Math.max(Math.abs(local.z) - car.kind.d * 0.5, 0);
+    return ox * ox + oz * oz <= radius * radius;
+  }
+
+  function noseInside(car, box) {
+    const yaw = car.yaw;
+    const fx = Math.sin(yaw);
+    const fz = Math.cos(yaw);
+    const rx = Math.cos(yaw);
+    const rz = -Math.sin(yaw);
+    const nose = Math.sign(car.speed || 1) * car.kind.d * 0.5;
+    const hw = car.kind.w * 0.46;
+    for (const lx of [hw, 0, -hw]) {
+      const sx = car.px + fx * nose + rx * lx;
+      const sz = car.pz + fz * nose + rz * lx;
+      if (sx > box.minX && sx < box.maxX && sz > box.minZ && sz < box.maxZ) return { x: sx, z: sz };
+    }
+    return null;
+  }
+
+  function ram(car) {
+    const speed = Math.abs(car.speed);
+    if (speed < 3.4) return;
+    const spec = car.spec || (car.spec = tune(car.kind));
+    const punch = spec.ram * (0.4 + speed / 16);
+    const dir = Math.sign(car.speed || 1);
+    const grip = {
+      dx: Math.sin(car.yaw) * dir,
+      dy: 0.12,
+      dz: Math.cos(car.yaw) * dir,
+    };
+    const power = {
+      knock: 0.8 + punch * 0.9,
+      lift: 0.5 + punch * 0.42,
+      spin: 0.75 + punch * 0.32,
+      cracks: punch > 2.35 ? 2 : 1,
+      shake: 0.8 + Math.min(0.7, punch * 0.16),
+      score: 0.85 + spec.ram * 0.2,
+      callout: punch > 2.2 ? 'CRASH!' : 'WHAM!',
+      burst: 'chip',
+    };
+    const now = performance.now();
+    const reach = CELL * 1.15;
+    let drag = 0;
+    for (const tile of tiles) {
+      if (!tile.props || !tile.props.length) continue;
+      const ox = shiftX + tile.gx * CELL;
+      const oz = shiftZ + tile.gz * CELL;
+      if (Math.abs(ox + CELL * 0.5 - car.px) > reach) continue;
+      if (Math.abs(oz + CELL * 0.5 - car.pz) > reach) continue;
+      for (let i = tile.props.length - 1; i >= 0; i--) {
+        const prop = tile.props[i];
+        if (prop.kind === 'building') {
+          if (punch < 1.05) continue;
+          if (now < (car.wallAt?.[prop.id] || 0)) continue;
+          const box = {
+            minX: ox + prop.lx - prop.hx,
+            maxX: ox + prop.lx + prop.hx,
+            minZ: oz + prop.lz - prop.hz,
+            maxZ: oz + prop.lz + prop.hz,
+          };
+          const nose = noseInside(car, box);
+          if (!nose) continue;
+          car.wallAt = car.wallAt || {};
+          car.wallAt[prop.id] = now + 420;
+          crackBuilding(tile, prop, { x: nose.x, y: car.ride, z: nose.z }, power);
+          car.scrapeAt = now + 460;
+          car.hop = Math.max(car.hop || 0, 0.22);
+          continue;
+        }
+        const wx = ox + prop.lx;
+        const wz = oz + prop.lz;
+        const radius = Math.max(0.32, (prop.radius || 0.55) * 0.8);
+        if (!overlapsCar(car, wx, wz, radius)) continue;
+        const y = Math.min(GROUND_Y + (prop.reachH || 2) - 0.05, car.ride);
+        if (!propTouches(tile, prop, wx, y, wz)) continue;
+        const mass = prop.mass || 8;
+        topple(tile, prop, grip, power);
+        drag += mass / (55 + spec.ram * 110);
+        car.hop = Math.max(car.hop || 0, 0.16);
+      }
+    }
+    if (drag > 0) car.speed *= 1 - Math.min(0.58, drag);
+  }
+
+  function plantCar(car) {
+    car.ride = GROUND_Y + car.kind.h / 2 + 0.05;
+    car.body.position.set(car.px, car.ride, car.pz);
+    car.body.previousPosition.copy(car.body.position);
+    car.body.aabbNeedsUpdate = true;
+    car.body.quaternion.setFromAxisAngle(AXIS_Y, car.yaw);
+    car.body.velocity.set(Math.sin(car.yaw) * car.speed, 0, Math.cos(car.yaw) * car.speed);
+    car.body.angularVelocity.set(0, 0, 0);
+    car.body.wakeUp();
+  }
+
+  function roll(car, dt, throttle, turn, loose) {
+    const spec = car.spec || (car.spec = tune(car.kind));
+    const boost = loose ? 0 : Math.min(0.85, car.boost || 0);
+    if (!loose) car.boost = Math.max(0, (car.boost || 0) - dt * 0.7);
+    if (throttle > 0.05 && car.speed < -0.8) car.speed += throttle * spec.accel * 1.7 * dt;
+    else if (throttle < -0.05 && car.speed > 0.8) car.speed += throttle * spec.accel * 1.9 * dt;
+    else if (Math.abs(throttle) > 0.05) car.speed += throttle * spec.accel * (1 + boost) * dt;
+    else car.speed += (0 - car.speed) * (1 - Math.exp(-(loose ? 2.4 : 1.35) * dt));
+    const cap = spec.top * (1 + boost * 0.4);
+    if (car.speed > cap) car.speed = cap;
+    if (car.speed < -spec.reverse) car.speed = -spec.reverse;
+    if (Math.abs(car.speed) < 0.12 && Math.abs(throttle) < 0.05) car.speed = 0;
+    if (!loose && boost > 0.15) car.speed += boost * 14 * dt;
+    if (Math.abs(car.speed) > 0.35 && turn) {
+      const grip = 0.42 + 0.58 * Math.min(1, Math.abs(car.speed) / 9);
+      car.yaw += turn * spec.turn * grip * Math.sign(car.speed) * dt;
+    }
+    car.px += Math.sin(car.yaw) * car.speed * dt;
+    car.pz += Math.cos(car.yaw) * car.speed * dt;
+    if (car.driven || car.loose) ram(car);
+    const nudge = buildingNudge(car.px, car.pz, car.yaw, car.kind);
+    const push = Math.hypot(nudge.x, nudge.z);
+    car.px += Math.max(-1.5, Math.min(1.5, nudge.x));
+    car.pz += Math.max(-1.5, Math.min(1.5, nudge.z));
+    if (push > 0.08) {
+      const into = (nudge.x * Math.sin(car.yaw) + nudge.z * Math.cos(car.yaw)) * Math.sign(car.speed || 1);
+      if (into < -0.02) {
+        const keep = 0.38 + Math.min(0.46, (spec.ram || 0.7) * 0.2);
+        car.speed *= keep;
+      }
+      if (push > 0.18 && Math.abs(car.speed) > 7 && performance.now() > (car.scrapeAt || 0)) {
+        car.scrapeAt = performance.now() + 460;
+        car.hop = Math.max(car.hop || 0, 0.14);
+        onEvent({
+          callout: 'SCRAPE!',
+          honk: true,
+          shake: 0.14,
+          crunch: true,
+          impact: 6,
+          pos: { x: car.px, y: car.ride + 0.4, z: car.pz },
+          burst: 'chip',
+        });
+      }
+    }
+    shoveTraffic(car);
+    plantCar(car);
+  }
+
+  function holdDriver() {
+    if (!ride) return;
+    const car = ride;
+    const x = car.px + Math.sin(car.yaw) * car.kind.d * 0.06;
+    const z = car.pz + Math.cos(car.yaw) * car.kind.d * 0.06;
+    const mover = ragdoll.mover();
+    mover.position.set(x, GROUND_Y + 0.72, z);
+    mover.previousPosition.copy(mover.position);
+    mover.velocity.set(0, 0, 0);
+    mover.angularVelocity.set(0, 0, 0);
+    mover.quaternion.set(0, 0, 0, 1);
+  }
+
+  function buckle() {
+    const mover = ragdoll.mover();
+    mover.type = CANNON.Body.KINEMATIC;
+    mover.collisionResponse = false;
+    mover.collisionFilterMask = 0;
+    mover.mass = 0;
+    mover.updateMassProperties();
+    mover.velocity.set(0, 0, 0);
+    mover.angularVelocity.set(0, 0, 0);
+    return mover;
+  }
+
+  function claim(car) {
+    const pose = carPose(car);
+    const vx = car.body.velocity.x;
+    const vz = car.body.velocity.z;
+    car.rogue = true;
+    car.loose = false;
+    car.driven = true;
+    car.pursuit = false;
+    car.px = pose.x;
+    car.pz = pose.z;
+    car.yaw = pose.yaw;
+    car.speed = vx * Math.sin(pose.yaw) + vz * Math.cos(pose.yaw);
+    car.boost = 0;
+    car.aimX = pose.x;
+    car.aimZ = pose.z;
+    car.passed = true;
+    car.life = 0;
+    ride = car;
+    gas = 0;
+    wheel = 0;
+    offer = false;
+    if (!ragdoll.walking()) ragdoll.setWalker(true);
+    buckle();
+    holdDriver();
+    onEvent({
+      callout: 'VROOM!',
+      honk: true,
+      bawk: true,
+      shake: 0.1,
+      hint: true,
+      pos: { x: car.px, y: car.ride + car.kind.h * 0.4, z: car.pz },
+    });
+    return true;
+  }
+
+  function releaseWheel() {
+    if (!ride) return null;
+    const car = ride;
+    car.driven = false;
+    car.loose = true;
+    car.rogue = true;
+    ride = null;
+    gas = 0;
+    wheel = 0;
+    return car;
+  }
+
+  function hopIn() {
+    if (ride || room || (bust && bust.phase) || !running) return false;
+    const car = closestCar(1.25);
+    if (!car) return false;
+    return claim(car);
+  }
+
+  function hopOut() {
+    const car = releaseWheel();
+    if (!car) return null;
+    const boxes = solidBoxes();
+    const door = car.kind.w / 2 + 0.9;
+    let side = 1;
+    let x = car.px - Math.cos(car.yaw) * door * side;
+    let z = car.pz + Math.sin(car.yaw) * door * side;
+    if (pointBlocked(x, z, 0.35, boxes)) {
+      side = -1;
+      x = car.px - Math.cos(car.yaw) * door * side;
+      z = car.pz + Math.sin(car.yaw) * door * side;
+    }
+    if (pointBlocked(x, z, 0.35, boxes)) {
+      x = car.px + Math.sin(car.yaw) * (car.kind.d / 2 + 0.9);
+      z = car.pz + Math.cos(car.yaw) * (car.kind.d / 2 + 0.9);
+    }
+    if (!ragdoll.walking()) ragdoll.setWalker(true);
+    ragdoll.place(x, ragdoll.torso.spawn.y, z);
+    const mover = freeMover();
+    const out = side === 1 ? 1 : -1;
+    mover.velocity.set(-Math.cos(car.yaw) * 3.4 * out, 5.4, Math.sin(car.yaw) * 3.4 * out);
+    onEvent({
+      callout: 'BAIL!',
+      bawk: true,
+      hint: true,
+      burst: 'feather',
+      pos: { x, y: mover.position.y + 0.6, z },
+    });
+    return { yaw: car.yaw, x, z };
   }
 
   const CHASE_SPEED = 18;
@@ -2737,6 +3209,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function enlist(car) {
+    if (car.driven) return;
     const p = car.body.position;
     const yaw = yawOf(car);
     car.pursuit = true;
@@ -2807,6 +3280,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function arrest(car) {
     if (bust || !car.pursuit || grace > 0) return;
+    releaseWheel();
     ensureJail(car.px, car.pz);
     if (!ragdoll.walking()) ragdoll.setWalker(true);
     ragdoll.place(car.px, ragdoll.torso.spawn.y, car.pz);
@@ -3052,6 +3526,11 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function clear() {
     running = false;
+    ride = null;
+    if (ragdoll.walking()) freeMover();
+    gas = 0;
+    wheel = 0;
+    offer = false;
     destroyRoom();
     if (parked) resumeCity();
     bust = null;
@@ -4321,6 +4800,33 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     startSwing: () => weapons.startSwing(),
     bounce,
     batter,
+    driving: () => !!ride,
+    canHopIn: () => offer,
+    hopIn,
+    hopOut,
+    pilot(nextGas, nextWheel) {
+      gas = Math.max(-1, Math.min(1, nextGas || 0));
+      wheel = Math.max(-1, Math.min(1, nextWheel || 0));
+    },
+    honk() {
+      if (!ride) return false;
+      if (performance.now() < ride.honkAt) return false;
+      ride.honkAt = performance.now() + 260;
+      onEvent({ honk: true });
+      return true;
+    },
+    goose() {
+      if (!ride) return;
+      ride.boost = Math.min(1.2, (ride.boost || 0) + 0.38);
+      if (performance.now() >= ride.honkAt) {
+        ride.honkAt = performance.now() + 180;
+        onEvent({ honk: true });
+      }
+    },
+    driveView() {
+      if (!ride) return null;
+      return { yaw: ride.yaw, speed: ride.speed, x: ride.px, z: ride.pz };
+    },
     locked: () => !!(bust && bust.phase === 'ride'),
     rideYaw() {
       if (bust && bust.phase === 'ride' && bust.car) return bust.car.yaw;
@@ -4364,6 +4870,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       };
     },
     interrupt() {
+      if (ride) hopOut();
       if (bust && bust.phase === 'ride') return false;
       if (bust && bust.phase === 'cell') {
         bust = null;
@@ -4418,6 +4925,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     prePhysics(dt) {
       if (!running || room) return;
       for (const car of cars) {
+        if (car.driven) {
+          roll(car, dt, gas, wheel, false);
+          continue;
+        }
+        if (car.loose) {
+          roll(car, dt, 0, 0, true);
+          continue;
+        }
         if (car.pursuit) {
           drivePursuit(car, dt);
           continue;
@@ -4434,10 +4949,16 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       plow();
       holdInmate();
+      holdDriver();
     },
     post(dt, torso) {
       if (!running || !torso) return null;
       if (room) return stepRoom(dt);
+      if (ride && !ragdoll.walking()) releaseWheel();
+      if (!ride && ragdoll.walking() && !(bust && bust.phase)) {
+        const landed = roofCar();
+        if (landed) claim(landed);
+      }
       const picked = weapons.tryPickup(torso.position.x, torso.position.z);
       if (picked) {
         onEvent({
@@ -4486,7 +5007,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         if (car.hop) car.hop = Math.max(0, car.hop - dt * 1.6);
         if (car.rogue) {
           car.spin += car.speed * dt * 1.6;
-          if (car.pursuit) continue;
+          if (car.pursuit || car.driven || car.loose) continue;
           const dx = car.px - car.aimX;
           const dz = car.pz - car.aimZ;
           if (car.life > 6 || (car.passed && dx * dx + dz * dz > 20 * 20)) gone.push(car);
@@ -4509,12 +5030,18 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       untangle();
       watchEntry(dt);
+      const nextOffer = !ride && ragdoll.walking() && !(bust && bust.phase) && !!closestCar(1.25);
+      if (nextOffer !== offer) {
+        offer = nextOffer;
+        onEvent({ hint: true });
+      }
       if (room) return null;
       retile(torso);
       const moved = recenter(torso);
       const box = bounds();
       for (const car of cars) {
         if (car.rogue) {
+          if (car.driven) continue;
           const dx = car.body.position.x - torso.position.x;
           const dz = car.body.position.z - torso.position.z;
           if (dx * dx + dz * dz < 64 && performance.now() > car.honkAt) {
@@ -4558,6 +5085,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       sirenRed.emissiveIntensity = blink ? 2.8 : 0.15;
       sirenBlue.emissiveIntensity = blink ? 0.15 : 2.8;
       for (const car of cars) {
+        if (car.driven || car.loose) plantCar(car);
         car.mesh.position.set(car.body.position.x, car.body.position.y + (car.hop || 0), car.body.position.z);
         car.mesh.quaternion.set(car.body.quaternion.x, car.body.quaternion.y, car.body.quaternion.z, car.body.quaternion.w);
         car.mesh.traverse((obj) => {

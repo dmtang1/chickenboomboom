@@ -677,6 +677,15 @@ function step(dt) {
     lookY = clamp(lookY, -1, 1);
     yaw -= lookX * dt * 2.4;
     pitch = clamp(pitch + lookY * dt * 1.6, 0.2, 1.25);
+    if (streetLevel() && streets.driving() && Math.abs(lookX) < 0.15) {
+      const view = streets.driveView();
+      if (view) {
+        let behind = view.yaw + Math.PI - yaw;
+        while (behind > Math.PI) behind -= Math.PI * 2;
+        while (behind < -Math.PI) behind += Math.PI * 2;
+        yaw += behind * (1 - Math.exp(-2.4 * dt));
+      }
+    }
   }
 
   const inMud = (levelId === 'straight' && stairs.snagged())
@@ -751,7 +760,14 @@ function step(dt) {
   if (streetLevel()) streets.tick(dt);
   if (streetLevel() && ragdoll.walking()) {
     const mover = ragdoll.mover();
-    if (streets.locked()) {
+    if (streets.driving()) {
+      const view = streets.driveView();
+      if (view) {
+        faceYaw = view.yaw;
+        walkPhase += Math.abs(view.speed) * 0.65 * dt;
+        ragdoll.poseWalker(faceYaw, walkPhase, Math.min(0.5, Math.abs(view.speed) / 30), dt, 0);
+      }
+    } else if (streets.locked()) {
       const face = streets.rideYaw();
       if (face != null) faceYaw = face;
       ragdoll.poseWalker(faceYaw, walkPhase, 0, dt, 0);
@@ -943,6 +959,16 @@ function assistBalance() {
 }
 
 function steer(dt, gp) {
+  if (streetLevel() && streets.driving()) {
+    let gas = 0;
+    let turn = 0;
+    if (keys.has('KeyW')) gas += 1;
+    if (keys.has('KeyS')) gas -= 1;
+    if (keys.has('KeyA')) turn += 1;
+    if (keys.has('KeyD')) turn -= 1;
+    streets.pilot(clamp(gas - gp.y, -1, 1), clamp(turn - gp.x, -1, 1));
+    return;
+  }
   if (streetBounce > 0) return;
   if (launchLock > 0 && (levelId === 'toybox' || levelId === 'chicken')) return;
   let ix = 0;
@@ -998,6 +1024,25 @@ function tryJump() {
   if (streetLevel() && streets.locked()) return;
   const now = performance.now();
   if (now - lastJumpAt < 280) return;
+  if (streetLevel() && streets.driving()) {
+    const out = streets.hopOut();
+    if (!out) return;
+    faceYaw = out.yaw;
+    lastJumpAt = now;
+    streetBounce = 0;
+    sfx.boing();
+    sfx.bawk();
+    streetHint();
+    return;
+  }
+  if (streetLevel() && streets.hopIn()) {
+    const view = streets.driveView();
+    if (view) faceYaw = view.yaw;
+    lastJumpAt = now;
+    streetBounce = 0;
+    streetHint();
+    return;
+  }
   if (streetLevel() && !ragdoll.walking()) {
     standChicken();
     lastJumpAt = now;
@@ -1048,6 +1093,10 @@ function tryJump() {
 
 function trySwing(tapped) {
   if (!started || !streetLevel() || streets.locked()) return;
+  if (streets.driving()) {
+    if (tapped) streets.honk();
+    return;
+  }
   if (streets.startSwing()) {
     sfx.flail();
     return;
@@ -1058,6 +1107,15 @@ function trySwing(tapped) {
 function tryFlail(body, tapped) {
   if (!started) return;
   if (streetLevel() && streets.locked()) return;
+  if (streetLevel() && streets.driving()) {
+    const now = performance.now();
+    if (now - lastFlailAt < (tapped ? 32 : 72)) return;
+    lastFlailAt = now;
+    streets.goose();
+    ragdoll.noteFlap();
+    if (tapped) sfx.bawk();
+    return;
+  }
   const now = performance.now();
   if (now - lastFlailAt < (tapped ? 32 : 72)) return;
   lastFlailAt = now;
@@ -1332,6 +1390,7 @@ function resetRagdoll() {
 }
 
 function rescueDoll() {
+  if (streetLevel() && streets.driving()) streets.hopOut();
   if (streetLevel()) {
     if (streets.indoor()) {
       const pose = streets.indoorSpawn();
@@ -1604,8 +1663,12 @@ function arrive(gate) {
 }
 
 function streetHint() {
-  let line = 'Bright doors open · green EXIT lets you out';
-  if (streets.indoor()) {
+  let line = 'Bright doors open · green EXIT lets you out · Space hops into a car';
+  if (streets.driving()) {
+    line = 'Driving · WASD steers · Space hops out · E honks · F boosts';
+  } else if (streets.canHopIn()) {
+    line = 'Space hops into the car · WASD drives once you are in';
+  } else if (streets.indoor()) {
     line = 'Inside · green EXIT lets you out';
   } else {
     const heat = streets.heat();
@@ -1742,8 +1805,15 @@ function updateCamera(dt, torso) {
     sunSprite.position.set(torso.position.x + 34, torso.position.y + 22, torso.position.z - 26);
   } else if (streetLevel()) {
     const cell = streets.cellFrame();
+    const drive = streets.driveView();
     if (cell) {
       desiredLook.set(cell.x, cell.y, cell.z);
+    } else if (drive) {
+      desiredLook.set(
+        torso.position.x + Math.sin(drive.yaw) * 2.4 + panX,
+        torso.position.y + 0.7 + panY,
+        torso.position.z + Math.cos(drive.yaw) * 2.4 + panZ,
+      );
     } else {
       desiredLook.set(torso.position.x + panX, torso.position.y + 0.9 + panY, torso.position.z + panZ);
     }
@@ -1755,7 +1825,9 @@ function updateCamera(dt, torso) {
   }
   look.lerp(desiredLook, 1 - Math.exp((room ? -10 : -4.5) * dt));
   const cell = streetLevel() ? streets.cellFrame() : null;
-  const dist = room ? Math.min(distance, room.dist) : distance;
+  const drive = streetLevel() ? streets.driveView() : null;
+  let dist = room ? Math.min(distance, room.dist) : distance;
+  if (drive) dist = Math.min(18, dist + 3.4 + Math.min(4.5, Math.abs(drive.speed) * 0.14));
   const camPitch = room ? Math.min(pitch, 0.62) : pitch;
   const cp = Math.cos(camPitch);
   if (cell) {
