@@ -152,11 +152,11 @@ const BUILDERS = {
 export function createWeapons(scene, art) {
   const root = new THREE.Group();
   scene.add(root);
+  const LOCAL = 'local';
   const drops = [];
-  let held = null;
+  const slots = new Map();
+  const ghosts = new Map();
   let shownKey = '';
-  let chop = 0;
-  const hitIds = new Set();
   const mats = {
     grip: art.plastic(0x6b3a1f, { roughness: 0.72 }),
     gold: art.plastic(0xffd23f, { roughness: 0.3, metalness: 0.42 }),
@@ -273,18 +273,22 @@ export function createWeapons(scene, art) {
     return drop;
   }
 
-  function take(drop) {
+  function slotOf(key = LOCAL) {
+    return slots.get(key) || null;
+  }
+
+  function take(drop, key) {
     drop.group.remove(drop.mesh);
     discard(drop.group);
     root.add(drop.mesh);
-    held = { kind: drop.kind, mesh: drop.mesh };
+    slots.set(key, { kind: drop.kind, mesh: drop.mesh, chop: 0, hitIds: new Set() });
     const index = drops.indexOf(drop);
     if (index >= 0) drops.splice(index, 1);
   }
 
-  function frame(hand, yaw, walking) {
-    if (!held || !hand) return null;
-    const swing = Math.sin(Math.min(1, chop) * Math.PI);
+  function gripFrame(chopValue, hand, yaw, walking) {
+    if (!hand) return null;
+    const swing = Math.sin(Math.min(1, chopValue) * Math.PI);
     if (!walking) {
       handQ.set(hand.quaternion.x, hand.quaternion.y, hand.quaternion.z, hand.quaternion.w);
       handQ.multiply(gripQ);
@@ -296,7 +300,7 @@ export function createWeapons(scene, art) {
         dx: dir.x,
         dy: dir.y,
         dz: dir.z,
-        hot: chop > 0.12 && chop < 0.94,
+        hot: chopValue > 0.12 && chopValue < 0.94,
         quat: handQ.clone(),
       };
     }
@@ -316,6 +320,12 @@ export function createWeapons(scene, art) {
       hot: swing > 0.4,
       quat: yawQ.clone().multiply(pitchQ),
     };
+  }
+
+  function frame(hand, yaw, walking, key = LOCAL) {
+    const slot = slotOf(key);
+    if (!slot) return null;
+    return gripFrame(slot.chop, hand, yaw, walking);
   }
 
   return {
@@ -341,12 +351,10 @@ export function createWeapons(scene, art) {
     clear() {
       for (const drop of drops) discard(drop.group);
       drops.length = 0;
-      if (held) {
-        discard(held.mesh);
-        held = null;
-      }
-      chop = 0;
-      hitIds.clear();
+      for (const slot of slots.values()) discard(slot.mesh);
+      slots.clear();
+      for (const ghost of ghosts.values()) discard(ghost.mesh);
+      ghosts.clear();
     },
     spawn,
     variety: () => KINDS.length,
@@ -380,7 +388,8 @@ export function createWeapons(scene, art) {
         drops.splice(i, 1);
       }
     },
-    tryPickup(x, z) {
+    tryPickup(x, z, key = LOCAL) {
+      if (slots.has(key)) return null;
       let best = null;
       let bestD = 1.7 * 1.7;
       for (const drop of drops) {
@@ -393,29 +402,49 @@ export function createWeapons(scene, art) {
           bestD = d;
         }
       }
-      if (!best || held) return null;
+      if (!best) return null;
       const kind = best.kind;
-      take(best);
+      take(best, key);
       return kind;
     },
-    release(x, z, yaw) {
-      if (!held) return null;
-      const { kind, mesh } = held;
-      held = null;
-      chop = 0;
-      hitIds.clear();
+    release(x, z, yaw, key = LOCAL) {
+      const slot = slotOf(key);
+      if (!slot) return null;
+      const { kind, mesh } = slot;
+      slots.delete(key);
       const ahead = 1.15;
       plant(mesh, kind, x + Math.sin(yaw) * ahead, z + Math.cos(yaw) * ahead);
       return kind;
     },
-    holding: () => held,
-    label: () => (held ? held.kind.label.replace('!', '') : ''),
-    blurb: () => (held ? held.kind.blurb : ''),
-    stats: () => (held ? held.kind : null),
-    reach: () => (held ? held.kind.reach : 0),
+    holding: (key = LOCAL) => slotOf(key),
+    label: () => {
+      const slot = slotOf(LOCAL);
+      return slot ? slot.kind.label.replace('!', '') : '';
+    },
+    labelAt: (index) => {
+      const kind = KINDS[index];
+      return kind ? kind.label.replace('!', '') : '';
+    },
+    blurb: () => {
+      const slot = slotOf(LOCAL);
+      return slot ? slot.kind.blurb : '';
+    },
+    stats: (key = LOCAL) => {
+      const slot = slotOf(key);
+      return slot ? slot.kind : null;
+    },
+    kindIndex: (key = LOCAL) => {
+      const slot = slotOf(key);
+      return slot ? KINDS.indexOf(slot.kind) : -1;
+    },
+    reach: () => {
+      const slot = slotOf(LOCAL);
+      return slot ? slot.kind.reach : 0;
+    },
     tick(dt) {
-      const swingTime = held ? held.kind.swing : 0.34;
-      chop = Math.max(0, chop - dt / swingTime);
+      for (const slot of slots.values()) {
+        slot.chop = Math.max(0, slot.chop - dt / slot.kind.swing);
+      }
       for (const drop of drops) {
         if (drop.wait > 0) drop.wait = Math.max(0, drop.wait - dt);
         drop.spin += dt * 1.7;
@@ -425,30 +454,70 @@ export function createWeapons(scene, art) {
         drop.beam.scale.set(1, pulse, 1);
       }
     },
-    startSwing() {
-      if (!held || chop > 0.08) return false;
-      chop = 1;
-      hitIds.clear();
+    startSwing(key = LOCAL) {
+      const slot = slotOf(key);
+      if (!slot || slot.chop > 0.08) return false;
+      slot.chop = 1;
+      slot.hitIds.clear();
       return true;
     },
-    chopping: () => chop > 0.08,
-    chop: () => chop,
-    seen(id) {
-      return hitIds.has(id);
+    chopping: () => {
+      const slot = slotOf(LOCAL);
+      return !!slot && slot.chop > 0.08;
     },
-    mark(id) {
-      hitIds.add(id);
+    chop: (key = LOCAL) => {
+      const slot = slotOf(key);
+      return slot ? slot.chop : 0;
+    },
+    seen(id, key = LOCAL) {
+      const slot = slotOf(key);
+      return !!slot && slot.hitIds.has(id);
+    },
+    mark(id, key = LOCAL) {
+      const slot = slotOf(key);
+      if (slot) slot.hitIds.add(id);
     },
     frame,
+    wear(list) {
+      const live = new Set();
+      for (const item of list) {
+        if (!item || item.index < 0 || !item.hand) continue;
+        live.add(item.id);
+        let ghost = ghosts.get(item.id);
+        if (!ghost || ghost.index !== item.index) {
+          if (ghost) discard(ghost.mesh);
+          const made = build(item.index);
+          root.add(made.mesh);
+          ghost = { index: item.index, mesh: made.mesh };
+          ghosts.set(item.id, ghost);
+        }
+        const grip = gripFrame(item.chop || 0, item.hand, item.yaw || 0, !!item.walking);
+        if (!grip) {
+          ghost.mesh.visible = false;
+          continue;
+        }
+        ghost.mesh.visible = true;
+        ghost.mesh.position.set(grip.x, grip.y, grip.z);
+        ghost.mesh.quaternion.copy(grip.quat);
+      }
+      for (const [id, ghost] of ghosts) {
+        if (live.has(id)) continue;
+        discard(ghost.mesh);
+        ghosts.delete(id);
+      }
+    },
     shown(on) {
       for (const drop of drops) drop.group.visible = on;
+      for (const slot of slots.values()) slot.mesh.visible = on;
+      for (const ghost of ghosts.values()) ghost.mesh.visible = on;
     },
-    pose(hand, yaw, walking) {
-      if (!held) return;
-      const grip = frame(hand, yaw, walking);
+    pose(hand, yaw, walking, key = LOCAL) {
+      const slot = slotOf(key);
+      if (!slot) return;
+      const grip = frame(hand, yaw, walking, key);
       if (!grip) return;
-      held.mesh.position.set(grip.x, grip.y, grip.z);
-      held.mesh.quaternion.copy(grip.quat);
+      slot.mesh.position.set(grip.x, grip.y, grip.z);
+      slot.mesh.quaternion.copy(grip.quat);
     },
   };
 }

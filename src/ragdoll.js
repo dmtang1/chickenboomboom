@@ -614,13 +614,27 @@ export function createRagdoll(world, scene, art, ragMat, feather = 0xffd84a) {
       vz = walker.velocity.z;
       setWalking(false);
     }
+    const aim = Math.hypot(style.dirX || 0, style.dirZ || 0);
+    let dirX;
+    let dirZ;
+    if (aim > 0.2) {
+      dirX = style.dirX / aim;
+      dirZ = style.dirZ / aim;
+      const shove = style.shove ?? 8;
+      vx = dirX * shove;
+      vz = dirZ * shove;
+    } else {
+      const horiz = Math.hypot(vx, vz);
+      dirX = horiz > 0.25 ? vx / horiz : 0;
+      dirZ = horiz > 0.25 ? vz / horiz : 1;
+    }
     const horiz = Math.hypot(vx, vz);
-    const dirX = horiz > 0.25 ? vx / horiz : 0;
-    const dirZ = horiz > 0.25 ? vz / horiz : 1;
     const spin = Math.min(style.maxSpin ?? 18, (style.spin ?? 3.5) + horiz * (style.spinScale ?? 0.62));
     const rollX = -dirZ * spin;
     const rollZ = dirX * spin;
-    const pop = Math.max(vy, style.minUp ?? 2.4);
+    const pop = aim > 0.2
+      ? Math.max(style.minUp ?? 2.4, vy > 0 ? vy * 0.45 : 0)
+      : Math.max(vy, style.minUp ?? 2.4);
     const spread = style.spread ?? 1.6;
     const yJitter = style.yJitter ?? 1.4;
     const wobble = style.wobble ?? 5;

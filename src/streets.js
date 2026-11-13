@@ -1,14 +1,21 @@
 import * as CANNON from 'cannon-es';
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { GROUND_Y, GROUP_PROP, GROUP_RAG, GROUP_STATIC, rand } from './util.js';
+import { GROUND_Y, GROUP_PROP, GROUP_RAG, GROUP_STATIC, clamp, rand } from './util.js';
 import { createWeapons } from './weapons.js';
 
 const CELL = 26;
 const ROAD = 8;
 const WALK = 2.5;
-const RANGE = 3;
-const SPAN = RANGE * 2 + 1;
+const CITY = 4;
+const SPAN = CITY;
+const LOOP_VERGE = 3.2;
+const LOOP_ROAD = 10;
+const LOOP_LANE = 2.15;
+const TURN_R = LOOP_ROAD / 2;
+const LOOP_SHOULDER = 2.2;
+const LOOP_BLUFF = 7.6;
+const WATER_DROP = 11;
 const AXIS_Y = new CANNON.Vec3(0, 1, 0);
 const FLOW_SPEED = 13;
 const FLOW_Z = 17;
@@ -91,11 +98,11 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   sky.renderOrder = -2;
   root.add(sky);
   const farGround = new THREE.Mesh(
-    new THREE.CircleGeometry(170, 48),
-    new THREE.MeshBasicMaterial({ color: 0xe7d3b0 }),
+    new THREE.CircleGeometry(280, 64),
+    new THREE.MeshBasicMaterial({ color: 0x176aae }),
   );
   farGround.rotation.x = -Math.PI / 2;
-  farGround.position.y = GROUND_Y - 0.06;
+  farGround.position.y = GROUND_Y - WATER_DROP;
   farGround.frustumCulled = false;
   farGround.renderOrder = -1;
   root.add(farGround);
@@ -145,6 +152,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
   const nsLens = { red: makeLens(0xff2436), yellow: makeLens(0xffd23f), green: makeLens(0x2ee56a) };
   const ewLens = { red: makeLens(0xff2436), yellow: makeLens(0xffd23f), green: makeLens(0x2ee56a) };
+  const loopLens = { red: makeLens(0xff2436), yellow: makeLens(0xffd23f), green: makeLens(0x2ee56a) };
+  const stemLens = { red: makeLens(0xff2436), yellow: makeLens(0xffd23f), green: makeLens(0x2ee56a) };
   const treeMat = art.plastic(0x3dae62, { roughness: 0.7 });
   const trunkMat = art.plastic(0x8d5a32, { roughness: 0.8 });
   const signMat = art.plastic(0xffe14a, { roughness: 0.4, emissive: 0xffb703 });
@@ -173,6 +182,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   const plazaMat = art.plastic(0xe6dcc8, { roughness: 0.84 });
   const waterMat = art.plastic(0x3ec6ff, { roughness: 0.16, emissive: 0x1498d8 });
   waterMat.emissiveIntensity = 0.55;
+  const rockMat = art.plastic(0x8a8178, { roughness: 0.94 });
+  const rockWet = art.plastic(0x4f636e, { roughness: 0.97 });
+  const foamMat = art.plastic(0xe9f6ff, { roughness: 0.48, emissive: 0xd4eeff });
+  foamMat.emissiveIntensity = 0.4;
+  const oceanMat = art.plastic(0x1e7ec2, { roughness: 0.2, emissive: 0x0c629e });
+  oceanMat.emissiveIntensity = 0.42;
+  const fenceMat = art.plastic(0xe6d3b0, { roughness: 0.7 });
+  const fencePost = art.plastic(0x8d6a45, { roughness: 0.82 });
   const woodSeat = art.plastic(0xc4844a, { roughness: 0.74 });
   const woodDark = art.plastic(0x7a4e2d, { roughness: 0.8 });
   const metalMat = art.plastic(0xc5ccd6, { roughness: 0.28, metalness: 0.7 });
@@ -198,6 +215,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   const coneGeo = new THREE.ConeGeometry(1, 1, 12);
   const hoopGeo = new THREE.TorusGeometry(0.34, 0.035, 6, 14);
   const poleGeo = new THREE.CylinderGeometry(0.06, 0.08, 2.3, 6);
+  const postGeo = new THREE.CylinderGeometry(0.07, 0.09, 1.12, 6);
   const signalHousingGeo = new THREE.BoxGeometry(0.42, 1.05, 0.42);
   const signalLensGeo = new THREE.SphereGeometry(0.12, 12, 8);
   const shapes = new Map();
@@ -210,9 +228,16 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let nextCarId = 1;
   let nextJunkId = 1;
   let mirror = false;
+  let shared = false;
   let actors = [ragdoll];
   const carGhosts = new Map();
   const junkGhosts = new Map();
+  const ghostQA = new THREE.Quaternion();
+  const ghostQB = new THREE.Quaternion();
+  let hostOffset = null;
+  let lastHostStamp = -1;
+  const CAR_DELAY = 0.1;
+  const CAR_SNAP = 18;
   const ghostRoot = new THREE.Group();
   root.add(ghostRoot);
   let toyGoals = [];
@@ -220,6 +245,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let ground = null;
   let shiftX = 0;
   let shiftZ = 0;
+  let district = null;
+  const districtBodies = [];
   let hits = 0;
   let running = false;
   let stillTime = 0;
@@ -1595,7 +1622,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function yawOf(car) {
-    if (car.rogue) return car.yaw;
+    if (car.rogue || car.loop || car.turning) return car.yaw;
     const forward = car.dir > 0;
     if (car.axis === 'z') return forward ? 0 : Math.PI;
     return forward ? Math.PI / 2 : -Math.PI / 2;
@@ -1855,7 +1882,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const slip = (Math.random() - 0.5) * kind.yaw * 2;
     const who = hitBody.doll || ragdoll;
     const torso = who.mover();
-    if (car.rogue) {
+    if (car.rogue || car.loop || car.turning) {
       torso.velocity.x = Math.sin(car.yaw) * forward;
       torso.velocity.z = Math.cos(car.yaw) * forward;
     } else {
@@ -1965,7 +1992,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         const a = cars[i];
         for (let j = i + 1; j < cars.length; j++) {
           const b = cars[j];
-          if (a.rogue || b.rogue) continue;
+          if (a.rogue || b.rogue || a.loop || b.loop || a.turning || b.turning) continue;
           if (!boxesOverlap(boundsOf(a, 0), boundsOf(b, 0))) continue;
           hit = true;
           separatePair(a, b);
@@ -1977,6 +2004,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function phaseOf() {
     return { z: 'green', x: 'green' };
+  }
+
+  function junctionPhase() {
+    const t = (performance.now() / 1000) % 18;
+    if (t < 8) return { loop: 'green', stem: 'red' };
+    if (t < 10) return { loop: 'yellow', stem: 'red' };
+    if (t < 16) return { loop: 'red', stem: 'green' };
+    return { loop: 'red', stem: 'yellow' };
   }
 
   function paintSignal(set, color) {
@@ -1992,7 +2027,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   function leadGap(car) {
     let bumper = Infinity;
     for (const other of cars) {
-      if (other.rogue || !sameLane(car, other)) continue;
+      if (other.rogue || other.loop || other.turning || !sameLane(car, other)) continue;
       const ahead = (other.travel - car.travel) * car.dir;
       if (ahead <= 0) continue;
       bumper = Math.min(bumper, ahead - (car.kind.d + other.kind.d) / 2);
@@ -2003,7 +2038,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   function holdLanes() {
     const groups = new Map();
     for (const car of cars) {
-      if (car.rogue) continue;
+      if (car.rogue || car.loop || car.turning) continue;
       const key = `${car.axis}:${car.slot}:${car.axis === 'z' ? car.gx : car.gz}`;
       let list = groups.get(key);
       if (!list) {
@@ -2024,36 +2059,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
   }
 
-  function distanceToClear(car) {
-    const origin = car.axis === 'z' ? shiftZ : shiftX;
-    const half = car.kind.d / 2;
-    const rear = car.travel - car.dir * half;
-    const k0 = Math.floor((Math.min(rear, car.travel) - origin) / CELL) - 1;
-    let remain = 0;
-    for (let k = k0; k <= k0 + 4; k++) {
-      const start = origin + k * CELL;
-      const end = start + ROAD;
-      if (car.dir > 0) {
-        if (rear < end && car.travel + half > start) remain = Math.max(remain, end - rear);
-      } else if (rear > start && car.travel - half < end) {
-        remain = Math.max(remain, rear - start);
-      }
-    }
-    return remain;
-  }
-
   function followFactor(car) {
-    const follow = 3.4 + car.cruise * 0.28;
+    const follow = 5.5;
     const gap = leadGap(car);
     let factor = 1;
-    if (gap < follow) {
-      const stopAt = 1.7;
-      factor = gap < stopAt ? 0 : (gap - stopAt) / (follow - stopAt);
-    }
-    if (inCrossRoad(car)) {
-      const remain = distanceToClear(car);
-      if (gap > remain + 0.5) factor = Math.max(factor, Math.min(1, 0.55));
-    }
+    if (gap < follow) factor = Math.max(0.86, gap / follow);
+    if (inCrossRoad(car)) factor = Math.max(factor, 0.92);
     return factor;
   }
 
@@ -2066,7 +2077,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     let gap = Infinity;
     const half = car.kind.d / 2;
     for (const other of cars) {
-      if (other === car || other.rogue || !sameLane(car, other)) continue;
+      if (other === car || other.rogue || other.loop || !sameLane(car, other)) continue;
       gap = Math.min(gap, Math.abs(other.travel - travel) - other.kind.d / 2 - half);
     }
     return gap;
@@ -2074,8 +2085,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function placeWrapped(car) {
     const box = bounds();
-    const min = (car.axis === 'z' ? box.minZ : box.minX) + 2;
-    const max = (car.axis === 'z' ? box.maxZ : box.maxX) - 2;
+    const min = (car.axis === 'z' ? box.minZ : box.minX) + 1;
+    const max = (car.axis === 'z' ? box.maxZ : box.maxX) - 1;
     const dir = car.travel > max ? -1 : 1;
     for (let n = 1; n <= SPAN + 2; n++) {
       const at = car.travel + dir * n * CELL;
@@ -2270,7 +2281,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function carPose(car) {
-    if (car.rogue || car.driven || car.loose) return { x: car.px, z: car.pz, yaw: car.yaw };
+    if (car.rogue || car.driven || car.loose || car.loop || car.turning) return { x: car.px, z: car.pz, yaw: car.yaw };
     const spot = centerOf(car);
     return { x: spot.x, z: spot.z, yaw: yawOf(car) };
   }
@@ -2427,6 +2438,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         other.px -= nx * push * 0.65;
         other.pz -= nz * push * 0.65;
         other.body.position.set(other.px, other.ride, other.pz);
+      } else if (other.loop || other.turning) {
+        // Beltway cars stay on their line.
       } else if (other.axis === 'z') {
         other.travel -= nz * push;
         syncCar(other);
@@ -2582,6 +2595,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const push = Math.hypot(nudge.x, nudge.z);
     car.px += Math.max(-1.5, Math.min(1.5, nudge.x));
     car.pz += Math.max(-1.5, Math.min(1.5, nudge.z));
+    if (car.driven || car.loose) {
+      const held = islandClamp(car.px, car.pz, 1.4);
+      if (held.out) {
+        car.px = held.x;
+        car.pz = held.z;
+        car.speed *= 0.25;
+      }
+    }
     if (push > 0.08) {
       const into = (nudge.x * Math.sin(car.yaw) + nudge.z * Math.cos(car.yaw)) * Math.sign(car.speed || 1);
       if (into < -0.02) {
@@ -3159,17 +3180,17 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     return true;
   }
 
-  function shoveLoose(x, y, z, dir, power, radius = 1.25) {
+  function shoveLoose(x, y, z, dir, power, radius = 1.25, key = 'local') {
     if (!jail || jail.open) return;
     const r2 = radius * radius;
     for (const item of jail.loose) {
-      if (weapons.seen(item.id)) continue;
+      if (weapons.seen(item.id, key)) continue;
       const p = item.body.position;
       const ox = p.x - x;
       const oy = p.y - y;
       const oz = p.z - z;
       if (ox * ox + oy * oy + oz * oz > r2) continue;
-      weapons.mark(item.id);
+      weapons.mark(item.id, key);
       const len = Math.hypot(ox, oz) || 1;
       const dx = dir ? dir.x : ox / len;
       const dz = dir ? dir.z : oz / len;
@@ -3440,26 +3461,436 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     return origin + index * CELL + (axis === 'z' ? FLOW_Z : FLOW_X);
   }
 
-  function spawnTraffic() {
-    for (let gx = -RANGE; gx <= RANGE; gx++) {
-      for (const slot of [0, 1]) {
-        for (let gz = -RANGE; gz <= RANGE; gz++) {
-          if (Math.random() < 0.22) continue;
-          spawnCar('z', slot, gx, 0, blockTravel('z', shiftZ, gz));
-        }
+  function coastLayout() {
+    const span = CITY * CELL;
+    const reach = LOOP_VERGE + LOOP_ROAD + LOOP_SHOULDER + LOOP_BLUFF;
+    return { span, reach, fence: LOOP_VERGE + LOOP_ROAD + LOOP_SHOULDER };
+  }
+
+  function islandClamp(x, z, margin) {
+    const { span, reach } = coastLayout();
+    const inset = Math.max(0, margin || 0);
+    const minX = shiftX - reach + inset;
+    const maxX = shiftX + span + reach - inset;
+    const minZ = shiftZ - reach + inset;
+    const maxZ = shiftZ + span + reach - inset;
+    const cx = Math.max(minX, Math.min(maxX, x));
+    const cz = Math.max(minZ, Math.min(maxZ, z));
+    return { x: cx, z: cz, out: cx !== x || cz !== z };
+  }
+
+  function loopMetrics() {
+    const span = CITY * CELL;
+    const radius = LOOP_ROAD / 2;
+    const straight = span + LOOP_VERGE * 2;
+    const arc = Math.PI * radius / 2;
+    const side = straight + arc;
+    return { span, radius, straight, arc, side, perim: side * 4 };
+  }
+
+  function loopPoint(distance, offset) {
+    const { span, radius, straight, side, perim } = loopMetrics();
+    const verge = LOOP_VERGE;
+    let u = distance % perim;
+    if (u < 0) u += perim;
+    const seg = Math.min(3, Math.floor(u / side));
+    const t = u - seg * side;
+    const off = offset || 0;
+    if (t < straight) {
+      if (seg === 0) return { x: -verge + t, z: -verge - radius - off, yaw: Math.PI / 2 };
+      if (seg === 1) return { x: span + verge + radius + off, z: -verge + t, yaw: 0 };
+      if (seg === 2) return { x: span + verge - t, z: span + verge + radius + off, yaw: -Math.PI / 2 };
+      return { x: -verge - radius - off, z: span + verge - t, yaw: Math.PI };
+    }
+    const ang = [-Math.PI / 2, 0, Math.PI / 2, Math.PI][seg] + (t - straight) / radius;
+    const rad = radius + off;
+    const cx = seg === 0 || seg === 1 ? span + verge : -verge;
+    const cz = seg === 0 || seg === 3 ? -verge : span + verge;
+    return {
+      x: cx + rad * Math.cos(ang),
+      z: cz + rad * Math.sin(ang),
+      yaw: Math.atan2(-Math.sin(ang), Math.cos(ang)),
+    };
+  }
+
+  function loopPose(distance, slot) {
+    const local = loopPoint(distance, slot === 0 ? LOOP_LANE : -LOOP_LANE);
+    return { x: shiftX + local.x, z: shiftZ + local.z, yaw: local.yaw };
+  }
+
+  function ringLine() {
+    const span = CITY * CELL;
+    const inset = LOOP_VERGE - LOOP_LANE;
+    return { span, inset, mid: inset + TURN_R };
+  }
+
+  function placeKinematic(car, pose, speed) {
+    car.px = pose.x;
+    car.pz = pose.z;
+    car.yaw = pose.yaw;
+    car.speed = speed;
+    car.body.position.set(pose.x, car.ride, pose.z);
+    car.body.previousPosition.copy(car.body.position);
+    car.body.aabbNeedsUpdate = true;
+    car.body.quaternion.setFromAxisAngle(AXIS_Y, pose.yaw);
+    car.body.velocity.set(Math.sin(pose.yaw) * speed, 0, Math.cos(pose.yaw) * speed);
+    car.body.angularVelocity.set(0, 0, 0);
+    car.body.wakeUp();
+  }
+
+  function placeLoop(car, speed) {
+    placeKinematic(car, loopPose(car.s, car.slot), speed);
+    car.dir = 1;
+  }
+
+  function leftPose(origin, radius, u) {
+    const yaw = origin.yaw - u * Math.PI / 2;
+    const lx = -Math.cos(origin.yaw);
+    const lz = Math.sin(origin.yaw);
+    const cx = origin.x + lx * radius;
+    const cz = origin.z + lz * radius;
+    const nlx = -Math.cos(yaw);
+    const nlz = Math.sin(yaw);
+    return { x: cx - nlx * radius, z: cz - nlz * radius, yaw };
+  }
+
+  function wrapS(distance) {
+    const { perim } = loopMetrics();
+    let s = distance % perim;
+    if (s < 0) s += perim;
+    return s;
+  }
+
+  function loopAhead(from, to) {
+    return wrapS(to - from);
+  }
+
+  function loopSFromPose(pose) {
+    const { side } = loopMetrics();
+    const span = CITY * CELL;
+    const x = pose.x - shiftX;
+    const z = pose.z - shiftZ;
+    const yaw = Math.atan2(Math.sin(pose.yaw), Math.cos(pose.yaw));
+    if (yaw > Math.PI / 4 && yaw < (3 * Math.PI) / 4) return x + LOOP_VERGE;
+    if (Math.abs(yaw) < Math.PI / 4) return side + (z + LOOP_VERGE);
+    if (yaw < -Math.PI / 4 && yaw > (-3 * Math.PI) / 4) return 2 * side + (span + LOOP_VERGE - x);
+    return 3 * side + (span + LOOP_VERGE - z);
+  }
+
+  function stemGate(car) {
+    const { span, inset } = ringLine();
+    if (car.axis === 'z') return { travel: car.dir > 0 ? shiftZ + span + inset : shiftZ - inset };
+    return { travel: car.dir > 0 ? shiftX + span + inset : shiftX - inset };
+  }
+
+  function gateOrigin(car) {
+    const gate = stemGate(car);
+    const off = laneOffset(car.axis, car.slot);
+    return {
+      x: car.axis === 'z' ? shiftX + car.gx * CELL + off : gate.travel,
+      z: car.axis === 'z' ? gate.travel : shiftZ + car.gz * CELL + off,
+      yaw: yawOf(car),
+      travel: gate.travel,
+    };
+  }
+
+  function spotClear(x, z, self, radius) {
+    const reach = radius * radius;
+    for (const other of cars) {
+      if (other === self || other.driven || other.loose) continue;
+      const dx = other.body.position.x - x;
+      const dz = other.body.position.z - z;
+      if (dx * dx + dz * dz < reach) return false;
+    }
+    return true;
+  }
+
+  function beginJoin(car) {
+    const start = gateOrigin(car);
+    car.turning = true;
+    car.travel = start.travel;
+    car.turn = { x: start.x, z: start.z, yaw: start.yaw, radius: TURN_R, u: 0, join: true };
+    car.px = start.x;
+    car.pz = start.z;
+    car.yaw = start.yaw;
+  }
+
+  function approachLoop(car) {
+    const remain = (stemGate(car).travel - car.travel) * car.dir;
+    if (remain > 1.05) return false;
+    beginJoin(car);
+    return true;
+  }
+
+  function loopMouths() {
+    const { side } = loopMetrics();
+    const { span, inset, mid } = ringLine();
+    const mouths = [];
+    for (let i = 0; i < CITY; i++) {
+      const at = i * CELL;
+      const northX = at + laneOffset('z', 0);
+      const southX = at + laneOffset('z', 1);
+      const eastZ = at + laneOffset('x', 0);
+      const westZ = at + laneOffset('x', 1);
+      mouths.push({
+        s: wrapS((northX - TURN_R) + LOOP_VERGE),
+        x: shiftX + northX - TURN_R,
+        z: shiftZ - mid,
+        yaw: Math.PI / 2,
+        axis: 'z',
+        slot: 0,
+        gx: i,
+        gz: 0,
+        dir: 1,
+        travel: shiftZ - inset,
+      });
+      mouths.push({
+        s: wrapS(2 * side + (span + LOOP_VERGE - (southX + TURN_R))),
+        x: shiftX + southX + TURN_R,
+        z: shiftZ + span + mid,
+        yaw: -Math.PI / 2,
+        axis: 'z',
+        slot: 1,
+        gx: i,
+        gz: 0,
+        dir: -1,
+        travel: shiftZ + span + inset,
+      });
+      mouths.push({
+        s: wrapS(side + (westZ - TURN_R + LOOP_VERGE)),
+        x: shiftX + span + mid,
+        z: shiftZ + westZ - TURN_R,
+        yaw: 0,
+        axis: 'x',
+        slot: 1,
+        gx: 0,
+        gz: i,
+        dir: -1,
+        travel: shiftX + span + inset,
+      });
+      mouths.push({
+        s: wrapS(3 * side + (span + LOOP_VERGE - (eastZ + TURN_R))),
+        x: shiftX - mid,
+        z: shiftZ + eastZ + TURN_R,
+        yaw: Math.PI,
+        axis: 'x',
+        slot: 0,
+        gx: 0,
+        gz: i,
+        dir: 1,
+        travel: shiftX - inset,
+      });
+    }
+    return mouths;
+  }
+
+  function mouthBetween(prev, next) {
+    const span = loopAhead(prev, next);
+    if (span <= 0.0001) return null;
+    let best = null;
+    let bestD = Infinity;
+    for (const mouth of loopMouths()) {
+      const d = loopAhead(prev, mouth.s);
+      if (d <= span && d < bestD) {
+        best = mouth;
+        bestD = d;
       }
     }
-    for (let gz = -RANGE; gz <= RANGE; gz++) {
-      for (const slot of [0, 1]) {
-        for (let gx = -RANGE; gx <= RANGE; gx++) {
-          if (Math.random() < 0.22) continue;
-          spawnCar('x', slot, 0, gz, blockTravel('x', shiftX, gx));
-        }
+    return best;
+  }
+
+  function laneClear(mouth, self) {
+    for (const other of cars) {
+      if (other === self || other.loop || other.rogue || other.turning) continue;
+      if (other.axis !== mouth.axis || other.slot !== mouth.slot) continue;
+      if (mouth.axis === 'z' ? other.gx !== mouth.gx : other.gz !== mouth.gz) continue;
+      const gap = Math.abs(other.travel - mouth.travel) - other.kind.d / 2 - 3.4;
+      if (gap < 5) return false;
+    }
+    return true;
+  }
+
+  function canLeave(car, mouth) {
+    if (!laneClear(mouth, car)) return false;
+    const end = leftPose(mouth, TURN_R, 1);
+    const mid = leftPose(mouth, TURN_R, 0.5);
+    if (!spotClear(end.x, end.z, car, 3.6)) return false;
+    return spotClear(mid.x, mid.z, car, 3.2);
+  }
+
+  function beginLeave(car, mouth) {
+    car.turning = true;
+    car.loop = false;
+    car.turn = {
+      x: mouth.x,
+      z: mouth.z,
+      yaw: mouth.yaw,
+      radius: TURN_R,
+      u: 0,
+      join: false,
+      axis: mouth.axis,
+      slot: mouth.slot,
+      gx: mouth.gx,
+      gz: mouth.gz,
+      dir: mouth.dir,
+      travel: mouth.travel,
+    };
+  }
+
+  function finishJoin(car, pose) {
+    car.turning = false;
+    car.turn = null;
+    car.loop = true;
+    car.roam = true;
+    car.slot = 1;
+    car.dir = 1;
+    car.cruise = FLOW_SPEED;
+    car.looped = 0;
+    car.leaveAfter = 46 + Math.random() * 70;
+    car.s = wrapS(loopSFromPose(pose));
+    placeLoop(car, car.cruise);
+  }
+
+  function finishLeave(car) {
+    const turn = car.turn;
+    car.turning = false;
+    car.loop = false;
+    car.roam = false;
+    car.axis = turn.axis;
+    car.slot = turn.slot;
+    car.gx = turn.gx;
+    car.gz = turn.gz;
+    car.dir = turn.dir;
+    car.travel = turn.travel;
+    car.cruise = FLOW_SPEED;
+    car.speed = turn.dir * FLOW_SPEED;
+    car.turn = null;
+    syncCar(car);
+    car.px = car.body.position.x;
+    car.pz = car.body.position.z;
+    car.yaw = yawOf(car);
+  }
+
+  function driveTurn(car, dt) {
+    const speed = car.cruise;
+    const arc = car.turn.radius * Math.PI / 2;
+    car.turn.u = Math.min(1, car.turn.u + (speed * dt) / arc);
+    const pose = leftPose(car.turn, car.turn.radius, car.turn.u);
+    placeKinematic(car, pose, speed);
+    if (car.turn.u < 1) return;
+    if (car.turn.join) finishJoin(car, pose);
+    else finishLeave(car);
+  }
+
+  function driveLoop(car, dt) {
+    const speed = car.cruise;
+    const step = speed * dt;
+    let next = car.s + step;
+    const { perim } = loopMetrics();
+    if (next >= perim) next -= perim;
+    if (car.roam && (car.looped || 0) >= (car.leaveAfter || 0)) {
+      const mouth = mouthBetween(car.s, next);
+      if (mouth && canLeave(car, mouth)) {
+        beginLeave(car, mouth);
+        return;
+      }
+    }
+    car.s = next;
+    if (car.roam) car.looped = (car.looped || 0) + step;
+    placeLoop(car, speed);
+  }
+
+  function respawnTravel(axis, slot, travel) {
+    const dir = slot === 0 ? 1 : -1;
+    const gate = stemGate({ axis, dir }).travel;
+    const remain = (gate - travel) * dir;
+    if (remain > 8) return travel;
+    return gate - dir * (14 + Math.random() * 12);
+  }
+
+  function spawnLoopCar(slot, distance) {
+    const kind = pickKind();
+    const pose = loopPose(distance, slot);
+    const body = new CANNON.Body({
+      mass: 0,
+      type: CANNON.Body.KINEMATIC,
+      material: carMat,
+      collisionFilterGroup: GROUP_PROP,
+      collisionFilterMask: GROUP_RAG | GROUP_PROP,
+      allowSleep: false,
+      fixedRotation: true,
+    });
+    body.addShape(new CANNON.Box(new CANNON.Vec3(kind.w / 2, kind.h / 2, kind.d / 2)));
+    body.angularFactor.set(0, 0, 0);
+    body.gameRole = 'car';
+    const mesh = buildCar(kind);
+    carRoot.add(mesh);
+    const car = {
+      id: nextCarId++,
+      axis: 'loop',
+      slot,
+      gx: 0,
+      gz: 0,
+      travel: 0,
+      s: distance,
+      dir: 1,
+      cruise: FLOW_SPEED,
+      speed: FLOW_SPEED,
+      kind,
+      ride: GROUND_Y + kind.h / 2 + 0.05,
+      body,
+      mesh,
+      cool: 0,
+      honkAt: 0,
+      spin: Math.random() * 6,
+      loop: true,
+      px: pose.x,
+      pz: pose.z,
+      yaw: pose.yaw,
+    };
+    body.addEventListener('collide', (event) => {
+      const other = event.body;
+      if (!running || !other || other.gameRole !== 'ragdoll') return;
+      if (weapons.chopping()) return;
+      smack(car, other);
+    });
+    addBody(body);
+    driveLoop(car, 0);
+    cars.push(car);
+    return car;
+  }
+
+  function reviveLoop(slot, along, roam) {
+    const born = spawnLoopCar(slot, (along || 0) + 52);
+    if (!roam) return born;
+    born.roam = true;
+    born.looped = 0;
+    born.leaveAfter = 36 + Math.random() * 90;
+    return born;
+  }
+
+  function spawnLoop() {
+    const { perim } = loopMetrics();
+    const count = 2;
+    const gap = perim / count;
+    for (const slot of [0, 1]) {
+      for (let i = 0; i < count; i++) spawnLoopCar(slot, i * gap + slot * gap * 0.5);
+    }
+  }
+
+  function spawnTraffic() {
+    for (let i = 0; i < CITY; i++) {
+      for (let n = 0; n < CITY - 1; n++) {
+        spawnCar('z', 0, i, 0, blockTravel('z', shiftZ, (i + n) % CITY));
+        spawnCar('z', 1, i, 0, blockTravel('z', shiftZ, (i + n + 2) % CITY));
+        spawnCar('x', 0, 0, i, blockTravel('x', shiftX, (i + n + 1) % CITY));
+        spawnCar('x', 1, 0, i, blockTravel('x', shiftX, (i + n + 3) % CITY));
       }
     }
     holdLanes();
     untangle();
-    for (const car of cars) syncCar(car);
+    spawnLoop();
+    for (const car of cars) if (!car.loop) syncCar(car);
   }
 
   function bounds() {
@@ -3473,32 +3904,13 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       minGz = Math.min(minGz, tile.gz);
       maxGz = Math.max(maxGz, tile.gz);
     }
+    const lip = 5;
     return {
-      minX: shiftX + minGx * CELL - 2,
-      maxX: shiftX + (maxGx + 1) * CELL + 2,
-      minZ: shiftZ + minGz * CELL - 2,
-      maxZ: shiftZ + (maxGz + 1) * CELL + 2,
+      minX: shiftX + minGx * CELL + lip,
+      maxX: shiftX + (maxGx + 1) * CELL - lip,
+      minZ: shiftZ + minGz * CELL + lip,
+      maxZ: shiftZ + (maxGz + 1) * CELL - lip,
     };
-  }
-
-  function shiftColumn(oldGx, newGx) {
-    for (const tile of tiles) {
-      if (tile.gx === oldGx) placeTile(tile, newGx, tile.gz);
-    }
-    for (const car of cars) {
-      if (car.rogue) continue;
-      if (car.axis === 'z' && car.gx === oldGx) car.gx = newGx;
-    }
-  }
-
-  function shiftRow(oldGz, newGz) {
-    for (const tile of tiles) {
-      if (tile.gz === oldGz) placeTile(tile, tile.gx, newGz);
-    }
-    for (const car of cars) {
-      if (car.rogue) continue;
-      if (car.axis === 'x' && car.gz === oldGz) car.gz = newGz;
-    }
   }
 
   function actorPoints() {
@@ -3508,41 +3920,6 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (body) points.push(body.position);
     }
     return points;
-  }
-
-  function retile(torso) {
-    const points = actorPoints();
-    if (!points.length && torso) points.push(torso.position);
-    let sx = 0;
-    let sz = 0;
-    for (const point of points) {
-      sx += point.x;
-      sz += point.z;
-    }
-    const pcx = Math.floor((sx / points.length - shiftX) / CELL);
-    const pcz = Math.floor((sz / points.length - shiftZ) / CELL);
-    for (let n = 0; n < SPAN; n++) {
-      let minX = Infinity;
-      let maxX = -Infinity;
-      for (const tile of tiles) {
-        minX = Math.min(minX, tile.gx);
-        maxX = Math.max(maxX, tile.gx);
-      }
-      if (minX < pcx - RANGE) shiftColumn(minX, minX + SPAN);
-      else if (maxX > pcx + RANGE) shiftColumn(maxX, maxX - SPAN);
-      else break;
-    }
-    for (let n = 0; n < SPAN; n++) {
-      let minZ = Infinity;
-      let maxZ = -Infinity;
-      for (const tile of tiles) {
-        minZ = Math.min(minZ, tile.gz);
-        maxZ = Math.max(maxZ, tile.gz);
-      }
-      if (minZ < pcz - RANGE) shiftRow(minZ, minZ + SPAN);
-      else if (maxZ > pcz + RANGE) shiftRow(maxZ, maxZ - SPAN);
-      else break;
-    }
   }
 
   function recenter() {
@@ -3572,7 +3949,26 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       doll.shiftWalker(dx, dz);
     }
     for (const car of cars) {
-      if (car.rogue) {
+      if (car.turning) {
+        car.turn.x += dx;
+        car.turn.z += dz;
+        if (car.turn.travel != null) car.turn.travel += car.turn.axis === 'x' ? dx : dz;
+        car.px += dx;
+        car.pz += dz;
+        car.body.position.x += dx;
+        car.body.position.z += dz;
+        car.body.previousPosition.copy(car.body.position);
+        if (car.axis === 'x') car.travel += dx;
+        else if (car.axis !== 'loop') car.travel += dz;
+      } else if (car.loop && !car.rogue) {
+        const pose = loopPose(car.s, car.slot);
+        car.px = pose.x;
+        car.pz = pose.z;
+        car.yaw = pose.yaw;
+        car.body.position.set(pose.x, car.ride, pose.z);
+        car.body.previousPosition.copy(car.body.position);
+        car.body.quaternion.setFromAxisAngle(AXIS_Y, pose.yaw);
+      } else if (car.rogue) {
         car.px += dx;
         car.pz += dz;
         car.aimX += dx;
@@ -3595,7 +3991,436 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     prey.x += dx;
     prey.z += dz;
     for (const tile of tiles) syncTile(tile);
+    syncDistrict();
     return { dx, dz };
+  }
+
+  function syncDistrict() {
+    if (ground && ground.lx != null) {
+      ground.position.set(shiftX + ground.lx, ground.ly, shiftZ + ground.lz);
+      ground.previousPosition.copy(ground.position);
+      ground.aabbNeedsUpdate = true;
+    }
+    if (!district) return;
+    district.position.set(shiftX, 0, shiftZ);
+    for (const entry of districtBodies) {
+      entry.body.position.set(shiftX + entry.lx, entry.ly, shiftZ + entry.lz);
+      entry.body.previousPosition.copy(entry.body.position);
+      entry.body.aabbNeedsUpdate = true;
+    }
+  }
+
+  function addDistrictWall(w, h, d, lx, ly, lz, material = concreteMat) {
+    const mesh = new THREE.Mesh(box, material);
+    mesh.scale.set(w, h, d);
+    mesh.position.set(lx, ly, lz);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    district.add(mesh);
+    const body = new CANNON.Body({
+      mass: 0,
+      material: buildingMat,
+      collisionFilterGroup: GROUP_STATIC,
+      collisionFilterMask: GROUP_RAG | GROUP_PROP,
+    });
+    body.addShape(new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, d / 2)));
+    body.position.set(shiftX + lx, ly, shiftZ + lz);
+    body.gameRole = 'static';
+    addBody(body);
+    districtBodies.push({ body, lx, ly, lz });
+  }
+
+  function deck(x, z, w, d, material = asphalt, y = GROUND_Y + 0.03) {
+    const mesh = new THREE.Mesh(plane, material);
+    mesh.scale.set(w, d, 1);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.set(x, y, z);
+    mesh.receiveShadow = true;
+    district.add(mesh);
+  }
+
+  function frameDeck(material, inner, outer, y) {
+    const span = CITY * CELL;
+    const depth = outer - inner;
+    const mid = (inner + outer) / 2;
+    deck(span / 2, -mid, span + outer * 2, depth, material, y);
+    deck(span / 2, span + mid, span + outer * 2, depth, material, y);
+    deck(-mid, span / 2, depth, span + inner * 2, material, y);
+    deck(span + mid, span / 2, depth, span + inner * 2, material, y);
+  }
+
+  function addStrip(w, h, d, x, y, z, material, shadow = false) {
+    const mesh = new THREE.Mesh(box, material);
+    mesh.scale.set(w, h, d);
+    mesh.position.set(x, y, z);
+    mesh.castShadow = shadow;
+    mesh.receiveShadow = true;
+    district.add(mesh);
+  }
+
+  function addDash(x, z, yaw, len, wid, material) {
+    const mesh = new THREE.Mesh(box, material);
+    mesh.scale.set(wid, 0.028, len);
+    mesh.position.set(x, GROUND_Y + 0.08, z);
+    mesh.rotation.y = yaw;
+    mesh.receiveShadow = true;
+    district.add(mesh);
+  }
+
+  function coastTree(x, z, scale) {
+    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+    trunk.position.set(x, GROUND_Y + 0.55 * scale, z);
+    trunk.scale.setScalar(scale);
+    const crown = new THREE.Mesh(crownGeo, treeMat);
+    crown.position.set(x, GROUND_Y + 1.28 * scale, z);
+    crown.scale.setScalar(scale * 1.2);
+    district.add(trunk, crown);
+  }
+
+  function addLamp(x, z) {
+    const pole = new THREE.Mesh(poleGeo, poleMat);
+    pole.position.set(x, GROUND_Y + 1.15, z);
+    pole.castShadow = true;
+    const head = new THREE.Mesh(box, lampMat);
+    head.scale.set(0.62, 0.12, 0.32);
+    head.position.set(x, GROUND_Y + 2.38, z);
+    district.add(pole, head);
+  }
+
+  function walkRim(dist, step, visit) {
+    const span = CITY * CELL;
+    const sides = [
+      [-dist, -dist, span + dist, -dist],
+      [span + dist, -dist, span + dist, span + dist],
+      [span + dist, span + dist, -dist, span + dist],
+      [-dist, span + dist, -dist, -dist],
+    ];
+    for (const [ax, az, bx, bz] of sides) {
+      const dx = bx - ax;
+      const dz = bz - az;
+      const len = Math.hypot(dx, dz) || 1;
+      for (let t = step * 0.45; t < len - 0.3; t += step) {
+        visit(ax + dx * (t / len), az + dz * (t / len), ax, az, bx, bz);
+      }
+    }
+  }
+
+  function addFenceSide(x0, z0, x1, z1) {
+    const dx = x1 - x0;
+    const dz = z1 - z0;
+    const length = Math.hypot(dx, dz) || 1;
+    const ux = dx / length;
+    const uz = dz / length;
+    const rail = 7.2;
+    const gap = 2.6;
+    const alongX = Math.abs(dx) >= Math.abs(dz);
+    for (let at = 0.35; at + rail < length - 0.15; at += rail + gap) {
+      const mid = at + rail / 2;
+      const x = x0 + ux * mid;
+      const z = z0 + uz * mid;
+      if (alongX) addDistrictWall(rail, 0.11, 0.14, x, GROUND_Y + 0.98, z, fenceMat);
+      else addDistrictWall(0.14, 0.11, rail, x, GROUND_Y + 0.98, z, fenceMat);
+      if (alongX) addStrip(rail, 0.09, 0.11, x, GROUND_Y + 0.46, z, fenceMat, true);
+      else addStrip(0.11, 0.09, rail, x, GROUND_Y + 0.46, z, fenceMat, true);
+    }
+    for (let at = 0.15; at < length - 0.05; at += 2.4) {
+      const post = new THREE.Mesh(postGeo, fencePost);
+      post.position.set(x0 + ux * at, GROUND_Y + 0.56, z0 + uz * at);
+      district.add(post);
+    }
+  }
+
+  function streetAt(index) {
+    return index * CELL;
+  }
+
+  function inStem(x, z) {
+    const span = CITY * CELL;
+    const pad = 1.15;
+    const verge = LOOP_VERGE + 0.7;
+    for (let i = 0; i < CITY; i++) {
+      const a = streetAt(i) - pad;
+      const b = streetAt(i) + ROAD + pad;
+      if (x > a && x < b && ((z < 0.5 && z > -verge) || (z > span - 0.5 && z < span + verge))) return true;
+      if (z > a && z < b && ((x < 0.5 && x > -verge) || (x > span - 0.5 && x < span + verge))) return true;
+    }
+    return false;
+  }
+
+  function mouthOpening(x, z) {
+    const span = CITY * CELL;
+    const near = LOOP_VERGE + LOOP_ROAD * 0.58;
+    for (let i = 0; i < CITY; i++) {
+      const a = streetAt(i) - 0.35;
+      const b = streetAt(i) + ROAD + 0.35;
+      if (x > a && x < b && z < 0.2 && z > -near) return true;
+      if (x > a && x < b && z > span - 0.2 && z < span + near) return true;
+      if (z > a && z < b && x < 0.2 && x > -near) return true;
+      if (z > a && z < b && x > span - 0.2 && x < span + near) return true;
+    }
+    return false;
+  }
+
+  function addTeeSignal(px, pz, stem, loop) {
+    const poleH = 2.3 * 1.75;
+    const group = new THREE.Group();
+    group.position.set(px, GROUND_Y + poleH / 2, pz);
+    const mast = new THREE.Mesh(poleGeo, poleMat);
+    mast.scale.set(0.9, 1.75, 0.9);
+    mast.castShadow = true;
+    group.add(mast);
+    const top = poleH / 2 - 0.08;
+    const arm = (dx, dz, lenses) => {
+      const len = Math.hypot(dx, dz);
+      const bar = new THREE.Mesh(box, signalMat);
+      if (Math.abs(dx) >= Math.abs(dz)) bar.scale.set(len, 0.1, 0.12);
+      else bar.scale.set(0.12, 0.1, len);
+      bar.position.set(dx / 2, top, dz / 2);
+      group.add(bar);
+      addSignalHead(group, lenses, dx, top - 0.62, dz);
+    };
+    arm(stem.x, stem.z, stemLens);
+    arm(loop.x, loop.z, loopLens);
+    district.add(group);
+    addStrip(1.05, 0.07, 1.05, px, GROUND_Y + 0.05, pz, sidewalkMat);
+  }
+
+  function addStopBar(x, z, alongZ) {
+    addDash(x, z, alongZ ? 0 : Math.PI / 2, ROAD - 1.15, 0.34, white);
+  }
+
+  function addMouthCrosswalk(x, z, alongZ) {
+    const count = 5;
+    const bar = 0.4;
+    const gap = 0.34;
+    const span = count * bar + (count - 1) * gap;
+    let cursor = -span / 2 + bar / 2;
+    for (let i = 0; i < count; i++) {
+      if (alongZ) addDash(x + cursor, z, 0, 1.25, bar, white);
+      else addDash(x, z + cursor, Math.PI / 2, 1.25, bar, white);
+      cursor += bar + gap;
+    }
+  }
+
+  function paveMouth(cx, cz, w, d) {
+    addStrip(w, 0.05, d, cx, GROUND_Y + 0.045, cz, asphalt);
+  }
+
+  function buildMouths() {
+    const span = CITY * CELL;
+    const lip = 0.55;
+    const depth = LOOP_VERGE + lip + 0.12;
+    const stem = 2.45;
+    const loopArm = 2.35;
+    for (let i = 0; i < CITY; i++) {
+      const x0 = streetAt(i);
+      const z0 = streetAt(i);
+      const cx = x0 + ROAD / 2;
+      const cz = z0 + ROAD / 2;
+      const southZ = (-LOOP_VERGE - lip + 0.12) / 2;
+      const northZ = span + (LOOP_VERGE + lip - 0.12) / 2;
+      const westX = (-LOOP_VERGE - lip + 0.12) / 2;
+      const eastX = span + (LOOP_VERGE + lip - 0.12) / 2;
+      paveMouth(cx, southZ, ROAD, depth);
+      paveMouth(cx, northZ, ROAD, depth);
+      paveMouth(westX, cz, depth, ROAD);
+      paveMouth(eastX, cz, depth, ROAD);
+
+      const stop = LOOP_VERGE - LOOP_LANE;
+      const walk = LOOP_VERGE - 1.2;
+      addStopBar(cx, -stop, false);
+      addMouthCrosswalk(cx, -walk, true);
+      addStopBar(cx, span + stop, false);
+      addMouthCrosswalk(cx, span + walk, true);
+      addStopBar(-stop, cz, true);
+      addMouthCrosswalk(-walk, cz, false);
+      addStopBar(span + stop, cz, true);
+      addMouthCrosswalk(span + walk, cz, false);
+
+      addTeeSignal(x0 - 0.62, -LOOP_VERGE + 0.55, { x: stem, z: 0 }, { x: 0, z: -loopArm });
+      addTeeSignal(x0 + ROAD + 0.62, span + LOOP_VERGE - 0.55, { x: -stem, z: 0 }, { x: 0, z: loopArm });
+      addTeeSignal(-LOOP_VERGE + 0.55, z0 + ROAD + 0.62, { x: 0, z: -stem }, { x: -loopArm, z: 0 });
+      addTeeSignal(span + LOOP_VERGE - 0.55, z0 - 0.62, { x: 0, z: stem }, { x: loopArm, z: 0 });
+    }
+  }
+
+  function buildDistrict() {
+    destroyDistrict();
+    district = new THREE.Group();
+    root.add(district);
+    const { span, reach, fence } = coastLayout();
+    const waterY = GROUND_Y - WATER_DROP;
+    const roadOuter = LOOP_VERGE + LOOP_ROAD;
+
+    frameDeck(grassMat, 0, LOOP_VERGE, GROUND_Y + 0.02);
+    frameDeck(asphalt, LOOP_VERGE, roadOuter, GROUND_Y + 0.045);
+    frameDeck(sidewalkMat, roadOuter, fence, GROUND_Y + 0.03);
+    frameDeck(grassMat, fence, reach - 1.45, GROUND_Y + 0.02);
+    frameDeck(sandMat, reach - 1.45, reach, GROUND_Y + 0.028);
+
+    buildMouths();
+
+    const { perim } = loopMetrics();
+    for (let s = 0; s < perim; s += 5.4) {
+      const mid = loopPoint(s, 0);
+      if (mouthOpening(mid.x, mid.z)) continue;
+      addDash(mid.x, mid.z, mid.yaw, 1.7, 0.16, white);
+    }
+    for (let s = 0; s < perim; s += 2.35) {
+      for (const off of [LOOP_ROAD / 2 - 0.38, -(LOOP_ROAD / 2 - 0.38)]) {
+        const edge = loopPoint(s, off);
+        if (mouthOpening(edge.x, edge.z)) continue;
+        addDash(edge.x, edge.z, edge.yaw, 2.2, 0.14, white);
+      }
+    }
+
+    addFenceSide(-fence, -fence, span + fence, -fence);
+    addFenceSide(span + fence, -fence, span + fence, span + fence);
+    addFenceSide(span + fence, span + fence, -fence, span + fence);
+    addFenceSide(-fence, span + fence, -fence, -fence);
+
+    walkRim(LOOP_VERGE * 0.55, 14, (x, z) => {
+      if (inStem(x, z)) return;
+      coastTree(x + rand(-0.4, 0.4), z + rand(-0.4, 0.4), rand(0.85, 1.25));
+    });
+    walkRim(fence + 3.5, 9.5, (x, z, ax, az, bx, bz) => {
+      const jx = Math.abs(bx - ax) > 1 ? 0 : rand(-0.8, 0.8);
+      const jz = Math.abs(bz - az) > 1 ? 0 : rand(-0.8, 0.8);
+      coastTree(x + jx, z + jz, rand(0.95, 1.45));
+    });
+    walkRim(fence - 1.05, 26, (x, z) => addLamp(x, z));
+    walkRim(reach - 0.85, 7.5, (x, z) => {
+      if (Math.random() < 0.45) return;
+      const rock = new THREE.Mesh(crownGeo, rockMat);
+      rock.scale.set(rand(0.35, 0.7), rand(0.16, 0.32), rand(0.3, 0.6));
+      rock.position.set(x + rand(-0.4, 0.4), GROUND_Y + 0.08, z + rand(-0.4, 0.4));
+      district.add(rock);
+    });
+
+    const sea = new THREE.Mesh(new THREE.CircleGeometry(260, 72), oceanMat);
+    sea.rotation.x = -Math.PI / 2;
+    sea.position.set(span / 2, waterY + 0.05, span / 2);
+    district.add(sea);
+    const foamW = span + reach * 2 + 8;
+    deck(span / 2, -reach - 1.7, foamW, 2.8, foamMat, waterY + 0.1);
+    deck(span / 2, span + reach + 1.7, foamW, 2.8, foamMat, waterY + 0.1);
+    deck(-reach - 1.7, span / 2, 2.8, span + reach * 2, foamMat, waterY + 0.1);
+    deck(span + reach + 1.7, span / 2, 2.8, span + reach * 2, foamMat, waterY + 0.1);
+
+    const cliffH = WATER_DROP;
+    const cliffT = 3.6;
+    const cliffY = waterY + cliffH / 2;
+    const face = span + reach * 2;
+    const wetH = cliffH * 0.38;
+    const wetY = waterY + wetH / 2;
+    addStrip(face + cliffT * 2, cliffH, cliffT, span / 2, cliffY, -reach - cliffT / 2, rockMat);
+    addStrip(face + cliffT * 2, cliffH, cliffT, span / 2, cliffY, span + reach + cliffT / 2, rockMat);
+    addStrip(cliffT, cliffH, face, -reach - cliffT / 2, cliffY, span / 2, rockMat);
+    addStrip(cliffT, cliffH, face, span + reach + cliffT / 2, cliffY, span / 2, rockMat);
+    addStrip(face + cliffT * 2, wetH, cliffT + 0.35, span / 2, wetY, -reach - cliffT / 2 - 0.12, rockWet);
+    addStrip(face + cliffT * 2, wetH, cliffT + 0.35, span / 2, wetY, span + reach + cliffT / 2 + 0.12, rockWet);
+    addStrip(cliffT + 0.35, wetH, face, -reach - cliffT / 2 - 0.12, wetY, span / 2, rockWet);
+    addStrip(cliffT + 0.35, wetH, face, span + reach + cliffT / 2 + 0.12, wetY, span / 2, rockWet);
+
+    const nestX = ROAD + WALK * 0.5;
+    const nestZ = (CELL + ROAD) * 0.5;
+    const pad = new THREE.Mesh(new THREE.CircleGeometry(1.7, 20), signMat);
+    pad.rotation.x = -Math.PI / 2;
+    pad.position.set(nestX, GROUND_Y + 0.08, nestZ);
+    pad.receiveShadow = true;
+    district.add(pad);
+    const pole = new THREE.Mesh(poleGeo, poleMat);
+    pole.position.set(nestX + 1.55, GROUND_Y + 1.15, nestZ);
+    pole.castShadow = true;
+    district.add(pole);
+    const stamp = document.createElement('canvas');
+    stamp.width = 256;
+    stamp.height = 96;
+    const draw = stamp.getContext('2d');
+    draw.fillStyle = '#ffe14a';
+    draw.fillRect(0, 0, 256, 96);
+    draw.strokeStyle = '#1b1b1b';
+    draw.lineWidth = 10;
+    draw.strokeRect(6, 6, 244, 84);
+    draw.fillStyle = '#1b1b1b';
+    draw.font = '700 54px Fredoka, sans-serif';
+    draw.textAlign = 'center';
+    draw.textBaseline = 'middle';
+    draw.fillText('NEST', 128, 52);
+    const map = new THREE.CanvasTexture(stamp);
+    map.colorSpace = THREE.SRGBColorSpace;
+    const sign = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthWrite: false }));
+    sign.position.set(nestX + 1.55, GROUND_Y + 2.45, nestZ);
+    sign.scale.set(1.8, 0.68, 1);
+    district.add(sign);
+    syncDistrict();
+  }
+
+  function destroyDistrict() {
+    for (const entry of districtBodies) removeBody(entry.body);
+    districtBodies.length = 0;
+    if (!district) return;
+    district.traverse((obj) => {
+      const shared = obj.geometry === box || obj.geometry === plane || obj.geometry === poleGeo
+        || obj.geometry === postGeo || obj.geometry === crownGeo || obj.geometry === trunkGeo;
+      if (obj.geometry && !shared) obj.geometry.dispose();
+      const material = obj.material;
+      const kept = material === concreteMat || material === asphalt || material === yellow || material === white
+        || material === signMat || material === poleMat || material === grassMat || material === sidewalkMat
+        || material === sandMat || material === rockMat || material === rockWet || material === foamMat
+        || material === oceanMat || material === fenceMat || material === fencePost || material === treeMat
+        || material === trunkMat || material === lampMat;
+      if (!material || kept) return;
+      if (material.map) material.map.dispose();
+      material.dispose();
+    });
+    district.removeFromParent();
+    district = null;
+  }
+
+  function containActors() {
+    if (room || mirror) return;
+    const water = GROUND_Y - WATER_DROP + 1.1;
+    for (const doll of actors) {
+      if (doll === ragdoll && ride) continue;
+      const body = doll.walking() ? doll.mover() : doll.torso.body;
+      if (!body || body.position.y > water) continue;
+      const spot = islandClamp(body.position.x, body.position.z, 2.4);
+      if (doll.walking()) {
+        const walker = doll.mover();
+        walker.position.set(spot.x, GROUND_Y + 1.35, spot.z);
+        walker.previousPosition.copy(walker.position);
+        walker.velocity.set(walker.velocity.x * 0.15, 5.2, walker.velocity.z * 0.15);
+        walker.wakeUp();
+      } else {
+        const dx = spot.x - body.position.x;
+        const dy = (GROUND_Y + 1.5) - body.position.y;
+        const dz = spot.z - body.position.z;
+        for (const part of doll.parts) {
+          part.body.position.x += dx;
+          part.body.position.y += dy;
+          part.body.position.z += dz;
+          part.body.previousPosition.copy(part.body.position);
+          part.body.velocity.x *= 0.15;
+          part.body.velocity.y = 5.2;
+          part.body.velocity.z *= 0.15;
+          part.body.wakeUp();
+        }
+      }
+      onEvent({
+        callout: 'SPLASH!',
+        shake: 0.16,
+        pos: { x: spot.x, y: GROUND_Y + 1.2, z: spot.z },
+        burst: 'chip',
+      });
+    }
+  }
+
+  function corner() {
+    return {
+      x: shiftX + ROAD + WALK * 0.5,
+      z: shiftZ + (CELL + ROAD) * 0.5,
+    };
   }
 
   function clear() {
@@ -3629,6 +4454,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     junk.length = 0;
     junkRoot.clear();
     weapons.clear();
+    destroyDistrict();
     if (ground) removeBody(ground);
     ground = null;
     shiftX = 0;
@@ -3653,19 +4479,25 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       collisionFilterGroup: GROUP_STATIC,
       collisionFilterMask: GROUP_RAG | GROUP_PROP,
     });
-    ground.addShape(new CANNON.Box(new CANNON.Vec3(170, 0.5, 170)));
-    ground.position.set(0, GROUND_Y - 0.5, 0);
+    const coast = coastLayout();
+    const half = coast.span / 2 + coast.reach;
+    ground.addShape(new CANNON.Box(new CANNON.Vec3(half, 0.5, half)));
+    ground.lx = coast.span / 2;
+    ground.ly = GROUND_Y - 0.5;
+    ground.lz = coast.span / 2;
+    ground.position.set(ground.lx, ground.ly, ground.lz);
     ground.gameRole = 'static';
     addBody(ground);
 
-    for (let gx = -RANGE; gx <= RANGE; gx++) {
-      for (let gz = -RANGE; gz <= RANGE; gz++) {
+    for (let gx = 0; gx < CITY; gx++) {
+      for (let gz = 0; gz < CITY; gz++) {
         const tile = { gx, gz, group: new THREE.Group(), bodies: [] };
         tileRoot.add(tile.group);
         tiles.push(tile);
         placeTile(tile, gx, gz);
       }
     }
+    buildDistrict();
     spawnTraffic();
     const spawn = {
       x: ROAD + WALK * 0.5,
@@ -3676,19 +4508,99 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function respawn(pos) {
-    const gx = Math.floor((pos.x - shiftX) / CELL);
-    const gz = Math.floor((pos.z - shiftZ) / CELL);
+    const gx = clamp(Math.floor((pos.x - shiftX) / CELL), 0, CITY - 1);
+    const gz = clamp(Math.floor((pos.z - shiftZ) / CELL), 0, CITY - 1);
     return {
       x: shiftX + gx * CELL + ROAD + WALK * 0.5,
       z: shiftZ + gz * CELL + (CELL + ROAD) * 0.5,
     };
   }
 
-  function handBody() {
-    for (const part of ragdoll.parts) {
+  function armKey(doll) {
+    return doll === ragdoll ? 'local' : doll;
+  }
+
+  function handOf(doll) {
+    for (const part of doll.parts) {
       if (part.name === 'handR') return part.body;
     }
     return null;
+  }
+
+  function birdTag(doll) {
+    return `bird:${doll.torso.body.id}`;
+  }
+
+  function birdSpots(doll) {
+    if (doll.walking()) {
+      const p = doll.mover().position;
+      return [
+        { x: p.x, y: p.y + 0.15, z: p.z, r: 0.62, part: 'body' },
+        { x: p.x, y: p.y + 0.95, z: p.z, r: 0.4, part: 'head' },
+      ];
+    }
+    const spots = [];
+    for (const part of doll.parts) {
+      if (part.name !== 'torso' && part.name !== 'head') continue;
+      const p = part.body.position;
+      spots.push({
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        r: part.name === 'head' ? 0.38 : 0.58,
+        part: part.name,
+      });
+    }
+    return spots;
+  }
+
+  function birdTouch(doll, x, y, z) {
+    let found = '';
+    for (const spot of birdSpots(doll)) {
+      const dx = spot.x - x;
+      const dy = spot.y - y;
+      const dz = spot.z - z;
+      if (dx * dx + dy * dy + dz * dz > spot.r * spot.r) continue;
+      if (spot.part === 'head') return 'head';
+      found = spot.part;
+    }
+    return found;
+  }
+
+  function birdCenter(doll) {
+    const p = doll.walking() ? doll.mover().position : doll.torso.body.position;
+    return { x: p.x, y: p.y + 0.4, z: p.z };
+  }
+
+  function launchBird(doll, grip, power, part) {
+    if (doll === ragdoll && ride) hopOut();
+    const at = birdCenter(doll);
+    const word = part === 'head' ? 'BEAK!' : power.callout;
+    hits += 1;
+    onEvent({
+      hit: true,
+      who: doll,
+      style: {
+        dirX: grip.dx,
+        dirZ: grip.dz,
+        shove: Math.min(16, 5.5 + (power.knock || 1) * 4.2),
+        spin: 2.8 + (power.spin || 1) * 3.2,
+        spinScale: 0.12,
+        maxSpin: 20,
+        minUp: 1.4 + (power.lift || 1) * 2.2,
+        spread: 0.8 + (power.knock || 1) * 0.35,
+        yJitter: 1.3,
+        wobble: 3.5 + (power.spin || 1) * 1.6,
+      },
+      callout: word,
+      flair: word,
+      score: Math.round(32 * (power.score || 1) * (part === 'head' ? 1.35 : 1)),
+      impact: part === 'head' ? 11 : 7,
+      pos: { x: at.x, y: at.y + 0.45, z: at.z },
+      burst: 'feather',
+      shake: 0.18 * (power.shake || 1),
+      bawk: true,
+    });
   }
 
   function dropSpot(gx, gz) {
@@ -3708,8 +4620,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       { x: origin.x + 13, z: origin.z - 7.6, index: 3 },
     ];
     for (const spot of welcome) weapons.spawn(spot.x, spot.z, spot.index % n);
-    for (let gx = -RANGE; gx <= RANGE; gx++) {
-      for (let gz = -RANGE; gz <= RANGE; gz++) {
+    for (let gx = 0; gx < CITY; gx++) {
+      for (let gz = 0; gz < CITY; gz++) {
         if (gx === 0 && gz === 0) continue;
         const spot = dropSpot(gx, gz);
         weapons.spawn(spot.x, spot.z, hash(gx, gz) % n);
@@ -3718,13 +4630,13 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function refillWeapons(px, pz) {
-    weapons.cull(px, pz, 96);
+    weapons.cull(px, pz, CITY * CELL * 2);
     const n = weapons.variety();
     let guard = 0;
-    while (weapons.count() < 20 && guard < 28) {
+    while (weapons.count() < 16 && guard < 28) {
       guard += 1;
-      const gx = Math.floor((px - shiftX) / CELL) + ((Math.random() * 5) | 0) - 2;
-      const gz = Math.floor((pz - shiftZ) / CELL) + ((Math.random() * 5) | 0) - 2;
+      const gx = clamp(Math.floor((px - shiftX) / CELL) + ((Math.random() * 5) | 0) - 2, 0, CITY - 1);
+      const gz = clamp(Math.floor((pz - shiftZ) / CELL) + ((Math.random() * 5) | 0) - 2, 0, CITY - 1);
       const spot = dropSpot(gx, gz);
       const dx = spot.x - px;
       const dz = spot.z - pz;
@@ -3805,9 +4717,16 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const gx = car.gx;
     const gz = car.gz;
     const travel = (axis === 'z' ? p.z : p.x) + car.dir * CELL * 2.4;
+    const loop = car.loop;
+    const along = car.s;
+    const roam = car.roam;
     removeCar(car);
     if (car.rogue) return;
-    spawnCar(axis, slot, gx, gz, travel);
+    if (loop) {
+      reviveLoop(slot, along, roam);
+      return;
+    }
+    spawnCar(axis, slot, gx, gz, respawnTravel(axis, slot, travel));
   }
 
   const WRECK = GROUP_PROP | 8;
@@ -3825,6 +4744,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const gx = car.gx;
     const gz = car.gz;
     const rogue = car.rogue;
+    const loop = car.loop;
+    const along = car.s;
+    const roam = car.roam;
     const travel = (axis === 'z' ? p.z : p.x) + car.dir * CELL * 2.4;
     const quat = car.body.quaternion;
     removeBody(car.body);
@@ -3860,7 +4782,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       pos: { x: p.x, y: p.y + 0.8, z: p.z },
       burst: power.burst || 'launch',
     });
-    if (!rogue) spawnCar(axis, slot, gx, gz, travel);
+    if (!rogue && loop) reviveLoop(slot, along, roam);
+    else if (!rogue) spawnCar(axis, slot, gx, gz, respawnTravel(axis, slot, travel));
   }
 
   function spawnChunk(x, y, z, color, sx, sy, sz, vx, vy, vz) {
@@ -4168,7 +5091,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function carBox(car) {
-    if (car.rogue) {
+    if (car.rogue || car.loop || car.turning) {
       const r = Math.max(car.kind.d, car.kind.w) * 0.55;
       const p = car.body.position;
       return { minX: p.x - r, maxX: p.x + r, minZ: p.z - r, maxZ: p.z + r };
@@ -4214,7 +5137,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         item.shoveAt = now + (item.roadkill ? 160 : 220);
         if (item.roadkill) {
           car.hop = Math.max(car.hop || 0, 0.28);
-          if (!car.rogue) car.travel -= car.dir * 0.42;
+          if (!car.rogue && !car.loop) car.travel -= car.dir * 0.42;
         }
         if (item.roadkill && !item.crunched) {
           item.crunched = true;
@@ -4266,16 +5189,22 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function slash() {
     if (bust && bust.phase === 'ride') return;
-    const power = weapons.stats();
-    const hand = handBody();
-    const grip = weapons.frame(hand, ragdoll.facing(), ragdoll.walking());
+    for (const doll of actors) swingAt(doll);
+  }
+
+  function swingAt(attacker) {
+    const key = armKey(attacker);
+    const power = weapons.stats(key);
+    const hand = handOf(attacker);
+    const grip = weapons.frame(hand, attacker.facing(), attacker.walking(), key);
     if (!power || !grip || !grip.hot) return;
     const rays = fanRays(grip, power.arc);
     const doomed = [];
     const struck = [];
+    const bruised = [];
 
     for (const car of cars) {
-      if (weapons.seen(car.id)) continue;
+      if (weapons.seen(car.id, key)) continue;
       let hit = false;
       for (const ray of rays) {
         for (let t = 0.15; t <= 1; t += 0.14) {
@@ -4288,13 +5217,35 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         if (hit) break;
       }
       if (!hit) continue;
-      weapons.mark(car.id);
+      weapons.mark(car.id, key);
       doomed.push(car);
+    }
+    for (const doll of actors) {
+      if (doll === attacker || weapons.seen(birdTag(doll), key)) continue;
+      let part = '';
+      let at = null;
+      for (const ray of rays) {
+        for (let t = 0.12; t <= 1; t += 0.12) {
+          const dist = power.reach * t;
+          const x = ray.x + ray.dx * dist;
+          const y = ray.y + ray.dy * dist;
+          const z = ray.z + ray.dz * dist;
+          part = birdTouch(doll, x, y, z);
+          if (part) {
+            at = { x, y, z };
+            break;
+          }
+        }
+        if (part) break;
+      }
+      if (!part) continue;
+      weapons.mark(birdTag(doll), key);
+      bruised.push({ doll, part, ...at });
     }
     for (const tile of tiles) {
       if (!tile.props) continue;
       for (const prop of tile.props) {
-        if (weapons.seen(prop.id)) continue;
+        if (weapons.seen(prop.id, key)) continue;
         let hit = null;
         for (const ray of rays) {
           for (let t = 0.12; t <= 1; t += 0.12) {
@@ -4310,24 +5261,24 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           if (hit) break;
         }
         if (!hit) continue;
-        weapons.mark(prop.id);
+        weapons.mark(prop.id, key);
         struck.push({ tile, prop, ...hit });
       }
     }
-    if (jail && !jail.open && grip) {
+    if (jail && !jail.open && grip && attacker === ragdoll) {
       const aim = { x: grip.dx, y: grip.dy, z: grip.dz };
       for (const ray of rays) {
         for (let t = 0.25; t <= 1; t += 0.25) {
           const dist = power.reach * t;
-          shoveLoose(ray.x + ray.dx * dist, ray.y + ray.dy * dist, ray.z + ray.dz * dist, aim, power);
+          shoveLoose(ray.x + ray.dx * dist, ray.y + ray.dy * dist, ray.z + ray.dz * dist, aim, power, 1.25, key);
         }
       }
     }
 
-    if (power.blast > 0 && (power.quake || doomed.length || struck.length)) {
+    if (power.blast > 0 && (power.quake || doomed.length || struck.length || bruised.length)) {
       const origins = [];
-      if (power.quake && !weapons.seen('quake')) {
-        weapons.mark('quake');
+      if (power.quake && !weapons.seen('quake', key)) {
+        weapons.mark('quake', key);
         const tip = {
           x: grip.x + grip.dx * power.reach * 0.85,
           y: grip.y + grip.dy * power.reach * 0.85,
@@ -4347,32 +5298,43 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         const p = car.body.position;
         origins.push({ x: p.x, y: p.y, z: p.z });
       }
+      for (const blow of bruised) origins.push(blow);
       const r2 = power.blast * power.blast;
       for (const origin of origins) {
         for (const car of cars) {
-          if (weapons.seen(car.id)) continue;
+          if (weapons.seen(car.id, key)) continue;
           const p = car.body.position;
           const dx = p.x - origin.x;
           const dy = p.y - origin.y;
           const dz = p.z - origin.z;
           if (dx * dx + dy * dy + dz * dz > r2) continue;
-          weapons.mark(car.id);
+          weapons.mark(car.id, key);
           doomed.push(car);
+        }
+        for (const doll of actors) {
+          if (doll === attacker || weapons.seen(birdTag(doll), key)) continue;
+          const at = birdCenter(doll);
+          const dx = at.x - origin.x;
+          const dy = at.y - origin.y;
+          const dz = at.z - origin.z;
+          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          weapons.mark(birdTag(doll), key);
+          bruised.push({ doll, part: 'body', x: at.x, y: at.y, z: at.z });
         }
         for (const tile of tiles) {
           if (!tile.props) continue;
           for (const prop of tile.props) {
-            if (weapons.seen(prop.id)) continue;
+            if (weapons.seen(prop.id, key)) continue;
             const at = propAnchor(tile, prop);
             const dx = at.x - origin.x;
             const dy = prop.kind === 'building' ? 0 : at.y - origin.y;
             const dz = at.z - origin.z;
             if (dx * dx + dy * dy + dz * dz > r2) continue;
-            weapons.mark(prop.id);
+            weapons.mark(prop.id, key);
             struck.push({ tile, prop, x: at.x, y: at.y, z: at.z });
           }
         }
-        if (jail && !jail.open) shoveLoose(origin.x, origin.y, origin.z, null, power, power.blast);
+        if (jail && !jail.open && attacker === ragdoll) shoveLoose(origin.x, origin.y, origin.z, null, power, power.blast, key);
       }
     }
 
@@ -4383,6 +5345,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         wave.push({ x: p.x, y: p.y, z: p.z });
       }
       for (const hit of struck) wave.push({ x: hit.x, y: hit.y, z: hit.z });
+      for (const blow of bruised) wave.push({ x: blow.x, y: blow.y, z: blow.z });
       const r2 = power.chainRange * power.chainRange;
       for (let hop = 0; hop < power.chain && wave.length; hop++) {
         const next = [];
@@ -4390,7 +5353,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           let best = null;
           let bestD = r2;
           for (const car of cars) {
-            if (weapons.seen(car.id)) continue;
+            if (weapons.seen(car.id, key)) continue;
             const p = car.body.position;
             const d = (p.x - from.x) ** 2 + (p.y - from.y) ** 2 + (p.z - from.z) ** 2;
             if (d < bestD) {
@@ -4398,10 +5361,19 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
               best = { car };
             }
           }
+          for (const doll of actors) {
+            if (doll === attacker || weapons.seen(birdTag(doll), key)) continue;
+            const at = birdCenter(doll);
+            const d = (at.x - from.x) ** 2 + (at.y - from.y) ** 2 + (at.z - from.z) ** 2;
+            if (d < bestD) {
+              bestD = d;
+              best = { doll, part: 'body', x: at.x, y: at.y, z: at.z };
+            }
+          }
           for (const tile of tiles) {
             if (!tile.props) continue;
             for (const prop of tile.props) {
-              if (weapons.seen(prop.id)) continue;
+              if (weapons.seen(prop.id, key)) continue;
               const at = propAnchor(tile, prop);
               const d = (at.x - from.x) ** 2 + (at.y - from.y) ** 2 + (at.z - from.z) ** 2;
               if (d < bestD) {
@@ -4412,12 +5384,16 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           }
           if (!best) continue;
           if (best.car) {
-            weapons.mark(best.car.id);
+            weapons.mark(best.car.id, key);
             doomed.push(best.car);
             const p = best.car.body.position;
             next.push({ x: p.x, y: p.y, z: p.z });
+          } else if (best.doll) {
+            weapons.mark(birdTag(best.doll), key);
+            bruised.push(best);
+            next.push({ x: best.x, y: best.y, z: best.z });
           } else {
-            weapons.mark(best.prop.id);
+            weapons.mark(best.prop.id, key);
             struck.push(best);
             next.push({ x: best.x, y: best.y, z: best.z });
           }
@@ -4442,6 +5418,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (blow.prop.kind === 'building') crackBuilding(blow.tile, blow.prop, blow, power);
       else topple(blow.tile, blow.prop, grip, power);
     }
+    for (const blow of bruised) launchBird(blow.doll, grip, power, blow.part);
   }
 
   function spawnJunk(x, z) {
@@ -4534,6 +5511,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       for (const body of jail.bodies) removeBody(body);
       for (const item of jail.loose) removeBody(item.body);
     }
+    for (const entry of districtBodies) removeBody(entry.body);
   }
 
   function resumeCity() {
@@ -4551,6 +5529,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       for (const body of jail.bodies) if (!body.world) addBody(body);
       for (const item of jail.loose) if (!item.body.world) addBody(item.body);
     }
+    for (const entry of districtBodies) if (!entry.body.world) addBody(entry.body);
   }
 
   function destroyRoom() {
@@ -4891,9 +5870,99 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       goalQ: new THREE.Quaternion(),
       goalSpin: 0,
       spin: 0,
+      samples: [],
+      vel: new THREE.Vector3(),
+      spinRate: 0,
     };
     ghostRoot.add(mesh);
     return ghost;
+  }
+  function noteCarClock(stamp) {
+    const local = performance.now() * 0.001;
+    const time = typeof stamp === 'number' && Number.isFinite(stamp) ? stamp : local;
+    if (hostOffset == null || time < lastHostStamp - 0.25) {
+      hostOffset = time - local;
+      for (const ghost of carGhosts.values()) ghost.samples.length = 0;
+    } else {
+      const delta = time - local - hostOffset;
+      hostOffset += delta * (delta > 0 ? 0.35 : 0.05);
+    }
+    lastHostStamp = time;
+    return time;
+  }
+  function pushCarSample(ghost, time, x, y, z, qx, qy, qz, qw, spin) {
+    const samples = ghost.samples;
+    const prev = samples.length ? samples[samples.length - 1] : null;
+    if (prev && time <= prev.t) return;
+    let px = qx;
+    let py = qy;
+    let pz = qz;
+    let pw = qw;
+    const wheel = spin || 0;
+    if (prev) {
+      const dot = prev.qx * qx + prev.qy * qy + prev.qz * qz + prev.qw * qw;
+      if (dot < 0) {
+        px = -qx;
+        py = -qy;
+        pz = -qz;
+        pw = -qw;
+      }
+      const dx = x - prev.x;
+      const dy = y - prev.y;
+      const dz = z - prev.z;
+      if (dx * dx + dy * dy + dz * dz > CAR_SNAP * CAR_SNAP) {
+        samples.length = 0;
+        ghost.vel.set(0, 0, 0);
+        ghost.spinRate = 0;
+        ghost.mesh.position.set(x, y, z);
+        ghost.mesh.quaternion.set(qx, qy, qz, qw);
+        ghost.spin = wheel;
+      } else {
+        const span = Math.max(0.001, time - prev.t);
+        ghost.vel.set(dx / span, dy / span, dz / span);
+        ghost.spinRate = (wheel - prev.spin) / span;
+      }
+    }
+    samples.push({ t: time, x, y, z, qx: px, qy: py, qz: pz, qw: pw, spin: wheel });
+    if (samples.length > 8) samples.shift();
+    if (samples.length === 1) {
+      ghost.mesh.position.set(x, y, z);
+      ghost.mesh.quaternion.set(qx, qy, qz, qw);
+      ghost.spin = wheel;
+    }
+  }
+  function poseCarGhost(ghost, now) {
+    const samples = ghost.samples;
+    if (!samples.length || hostOffset == null) return;
+    const renderT = now + hostOffset - CAR_DELAY;
+    while (samples.length >= 2 && samples[1].t <= renderT) samples.shift();
+    const a = samples[0];
+    if (samples.length < 2 || renderT <= a.t) {
+      const extra = samples.length < 2 ? Math.max(0, Math.min(0.08, renderT - a.t)) : 0;
+      ghost.mesh.position.set(
+        a.x + ghost.vel.x * extra,
+        a.y + ghost.vel.y * extra,
+        a.z + ghost.vel.z * extra,
+      );
+      ghost.mesh.quaternion.set(a.qx, a.qy, a.qz, a.qw);
+      ghost.spin = a.spin + ghost.spinRate * extra;
+    } else {
+      const b = samples[1];
+      const span = Math.max(0.001, b.t - a.t);
+      const u = Math.min(1, (renderT - a.t) / span);
+      ghost.mesh.position.set(
+        a.x + (b.x - a.x) * u,
+        a.y + (b.y - a.y) * u,
+        a.z + (b.z - a.z) * u,
+      );
+      ghostQA.set(a.qx, a.qy, a.qz, a.qw);
+      ghostQB.set(b.qx, b.qy, b.qz, b.qw);
+      ghost.mesh.quaternion.copy(ghostQA).slerp(ghostQB, u);
+      ghost.spin = a.spin + (b.spin - a.spin) * u;
+    }
+    ghost.mesh.traverse((obj) => {
+      if (obj.userData.wheel) obj.rotation.y = ghost.spin;
+    });
   }
   function applyLayout(sx, sz, coords) {
     if (!coords || coords.length !== tiles.length) return false;
@@ -4912,6 +5981,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     if (changed) {
       for (const tile of tiles) syncTile(tile);
     }
+    syncDistrict();
     return changed;
   }
   function applyBuildings(ids) {
@@ -4925,7 +5995,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
     }
   }
-  function applyCars(list, hard) {
+  function applyCars(list, time) {
+    const stamp = noteCarClock(time);
     const seen = new Set();
     for (const row of list || []) {
       const [id, kindId, color, x, y, z, qx, qy, qz, qw, spin] = row;
@@ -4935,18 +6006,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         const kind = KINDS.find((entry) => entry.id === kindId) || KINDS[0];
         ghost = freshGhost(buildCar(kind, color));
         carGhosts.set(id, ghost);
-        goalOf(ghost, x, y, z, qx, qy, qz, qw);
-        ghost.mesh.position.copy(ghost.goal);
-        ghost.mesh.quaternion.copy(ghost.goalQ);
-      } else {
-        goalOf(ghost, x, y, z, qx, qy, qz, qw);
-        if (hard) {
-          ghost.mesh.position.copy(ghost.goal);
-          ghost.mesh.quaternion.copy(ghost.goalQ);
-        }
       }
-      ghost.goalSpin = spin || 0;
-      if (hard) ghost.spin = ghost.goalSpin;
+      pushCarSample(ghost, stamp, x, y, z, qx, qy, qz, qw, spin);
     }
     for (const [id, ghost] of carGhosts) {
       if (seen.has(id)) continue;
@@ -4971,7 +6032,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       } else {
         goalOf(ghost, x, y, z, qx, qy, qz, qw);
         if (ghost.mesh.material.color.getHex() !== color) ghost.mesh.material = paintOf(color || 0xffd84a);
-        if (hard) {
+        const jump = ghost.mesh.position.distanceToSquared(ghost.goal);
+        if (hard || jump > 36) {
           ghost.mesh.position.copy(ghost.goal);
           ghost.mesh.quaternion.copy(ghost.goalQ);
         }
@@ -5022,15 +6084,42 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     hits: () => hits,
     walkerMaterial: () => walkMat,
     weaponLabel: () => weapons.label(),
+    weaponName: (index) => weapons.labelAt(index),
     weaponBlurb: () => weapons.blurb(),
     putDown() {
       if (!running) return null;
       const body = ragdoll.mover();
-      return weapons.release(body.position.x, body.position.z, ragdoll.facing());
+      return weapons.release(body.position.x, body.position.z, ragdoll.facing(), 'local');
+    },
+    dropArm(doll) {
+      if (!running || !doll) return null;
+      const body = doll.mover();
+      const kind = weapons.release(body.position.x, body.position.z, doll.facing(), armKey(doll));
+      if (kind) onEvent({ callout: 'DOWN', who: doll, hint: true });
+      return kind;
     },
     tick: (dt) => { if (running) weapons.tick(dt); },
     chop: () => weapons.chop(),
-    startSwing: () => weapons.startSwing(),
+    chopOf: (doll) => weapons.chop(armKey(doll)),
+    armState(doll) {
+      const index = weapons.kindIndex(armKey(doll));
+      if (index < 0) return null;
+      return {
+        index,
+        chop: Math.round(weapons.chop(armKey(doll)) * 100) / 100,
+      };
+    },
+    startSwing() {
+      if (!running || mirror || ride) return false;
+      if (bust && bust.phase === 'ride') return false;
+      return weapons.startSwing('local');
+    },
+    swingArm(doll) {
+      if (!running || mirror || !doll) return false;
+      if (doll === ragdoll && ride) return false;
+      if (bust && bust.phase === 'ride') return false;
+      return weapons.startSwing(armKey(doll));
+    },
     bounce,
     batter,
     driving: () => !!ride,
@@ -5111,6 +6200,22 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       return true;
     },
+    stepOut() {
+      if (bust && bust.phase === 'ride') return false;
+      if (ride) hopOut();
+      if (room) {
+        destroyRoom();
+        resumeCity();
+        portalLock = 0.35;
+        pendingGate = null;
+      }
+      if (bust && bust.phase === 'cell') {
+        bust = null;
+        grace = 1.2;
+      }
+      return true;
+    },
+    corner,
     begin,
     clear,
     respawn,
@@ -5174,6 +6279,19 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           driveRogue(car, dt);
           continue;
         }
+        if (car.turning) {
+          driveTurn(car, dt);
+          continue;
+        }
+        if (car.loop) {
+          driveLoop(car, dt);
+          if (car.turning) driveTurn(car, dt);
+          continue;
+        }
+        if (approachLoop(car)) {
+          if (car.turning) driveTurn(car, dt);
+          continue;
+        }
         car.speed = car.dir * car.cruise * followFactor(car);
         syncCar(car);
         car.body.velocity.set(car.axis === 'x' ? car.speed : 0, 0, car.axis === 'z' ? car.speed : 0);
@@ -5192,11 +6310,19 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         const landed = roofCar();
         if (landed) claim(landed);
       }
-      const picked = weapons.tryPickup(torso.position.x, torso.position.z);
-      if (picked) {
+      const pickedFor = [];
+      for (const doll of actors) {
+        if (!doll.walking()) continue;
+        if (doll === ragdoll && ride) continue;
+        const body = doll.mover();
+        const picked = weapons.tryPickup(body.position.x, body.position.z, armKey(doll));
+        if (picked) pickedFor.push({ doll, picked, body });
+      }
+      for (const grab of pickedFor) {
         onEvent({
-          callout: `${picked.label} ${picked.blurb}`,
-          pos: { x: torso.position.x, y: torso.position.y + 1.1, z: torso.position.z },
+          callout: `${grab.picked.label} ${grab.picked.blurb}`,
+          who: grab.doll,
+          pos: { x: grab.body.position.x, y: grab.body.position.y + 1.1, z: grab.body.position.z },
           burst: 'toys',
           shake: 0.08,
           pickup: true,
@@ -5222,7 +6348,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         const campDx = prey.x - campX;
         const campDz = prey.z - campZ;
         prey.still = campDx * campDx + campDz * campDz < 1.6 * 1.6;
-        if (!hunting) {
+        if (!hunting && !shared) {
           if (prey.still) stillTime += dt;
           else {
             campX = prey.x;
@@ -5231,7 +6357,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           }
         }
       }
-      if (!hunting && stillTime >= STILL_SECONDS) {
+      if (!shared && !hunting && stillTime >= STILL_SECONDS) {
         stillTime = 0;
         summonCrazy(prey.x, prey.z);
       }
@@ -5244,6 +6370,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           const dx = car.px - car.aimX;
           const dz = car.pz - car.aimZ;
           if (car.life > 6 || (car.passed && dx * dx + dz * dz > 20 * 20)) gone.push(car);
+          continue;
+        }
+        if (car.loop || car.turning) {
+          car.spin += car.speed * dt * 1.6;
           continue;
         }
         if (car.axis === 'z') car.travel = car.body.position.z;
@@ -5272,9 +6402,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       farGround.position.x = torso.position.x;
       farGround.position.z = torso.position.z;
       if (room) return null;
-      retile(torso);
       const moved = recenter();
-      const box = bounds();
+      containActors();
       for (const car of cars) {
         if (car.rogue) {
           if (car.driven) continue;
@@ -5286,9 +6415,17 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           }
           continue;
         }
-        if (car.axis === 'z') {
-          if (car.travel > box.maxZ || car.travel < box.minZ) placeWrapped(car);
-        } else if (car.travel > box.maxX || car.travel < box.minX) placeWrapped(car);
+        if (car.loop || car.turning) {
+          const dx = car.body.position.x - torso.position.x;
+          const dz = car.body.position.z - torso.position.z;
+          if (dx * dx + dz * dz < 42 && Math.random() < dt * 0.12 && performance.now() > car.honkAt) {
+            car.honkAt = performance.now() + 1400;
+            onEvent({ honk: true });
+          }
+          continue;
+        }
+        const remain = (stemGate(car).travel - car.travel) * car.dir;
+        if (remain < -0.04) car.travel = stemGate(car).travel;
         syncCar(car);
         const dx = car.body.position.x - torso.position.x;
         const dz = car.body.position.z - torso.position.z;
@@ -5317,6 +6454,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       const phase = phaseOf();
       paintSignal(nsLens, phase.z);
       paintSignal(ewLens, phase.x);
+      const tee = junctionPhase();
+      paintSignal(loopLens, tee.loop);
+      paintSignal(stemLens, tee.stem);
       if (mirror) return;
       const blink = Math.sin(performance.now() * 0.02) > 0;
       sirenRed.emissiveIntensity = blink ? 2.8 : 0.15;
@@ -5345,13 +6485,52 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           item.mesh.quaternion.set(item.body.quaternion.x, item.body.quaternion.y, item.body.quaternion.z, item.body.quaternion.w);
         }
       }
-      weapons.pose(handBody(), ragdoll.facing(), ragdoll.walking());
+      for (const doll of actors) {
+        weapons.pose(handOf(doll), doll.facing(), doll.walking(), armKey(doll));
+      }
     },
     setActors(list) {
       actors = list && list.length ? list : [ragdoll];
     },
+    wearPlayers(players, dollFor) {
+      if (!mirror) {
+        weapons.wear([]);
+        return;
+      }
+      const specs = [];
+      for (const pose of players || []) {
+        if (!pose || pose.arm == null || pose.arm < 0) continue;
+        const doll = dollFor(pose.id);
+        if (!doll) continue;
+        specs.push({
+          id: pose.id,
+          index: pose.arm,
+          chop: pose.chop || 0,
+          hand: handOf(doll),
+          yaw: doll.facing(),
+          walking: doll.walking(),
+        });
+      }
+      weapons.wear(specs);
+    },
+    setShared(on) {
+      shared = !!on;
+      if (shared) {
+        stillTime = 0;
+        prey.still = false;
+      }
+    },
     setMirror(on) {
-      mirror = !!on;
+      const next = !!on;
+      if (mirror && !next) {
+        hostOffset = null;
+        lastHostStamp = -1;
+        for (const ghost of carGhosts.values()) ghost.mesh.removeFromParent();
+        carGhosts.clear();
+        for (const ghost of junkGhosts.values()) ghost.mesh.removeFromParent();
+        junkGhosts.clear();
+      }
+      mirror = next;
       if (!mirror) return;
       for (const car of cars.splice(0, cars.length)) {
         removeBody(car.body);
@@ -5425,7 +6604,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (!city || !mirror) return false;
       const hard = applyLayout(city.sx || 0, city.sz || 0, city.tiles);
       applyBuildings(city.buildings);
-      applyCars(city.cars, hard);
+      applyCars(city.cars, city.time);
       applyJunk(city.junk, hard);
       weapons.show(city.drops || []);
       applyRoom(!!city.inside, city.back, city.toys, hard);
@@ -5435,14 +6614,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     glide(dt) {
       if (!mirror) return;
       const k = 1 - Math.exp(-12 * dt);
-      for (const ghost of carGhosts.values()) {
-        ghost.mesh.position.lerp(ghost.goal, k);
-        ghost.mesh.quaternion.slerp(ghost.goalQ, k);
-        ghost.spin += (ghost.goalSpin - ghost.spin) * k;
-        ghost.mesh.traverse((obj) => {
-          if (obj.userData.wheel) obj.rotation.y = ghost.spin;
-        });
-      }
+      const now = performance.now() * 0.001;
+      for (const ghost of carGhosts.values()) poseCarGhost(ghost, now);
       for (const ghost of junkGhosts.values()) {
         ghost.mesh.position.lerp(ghost.goal, k);
         ghost.mesh.quaternion.slerp(ghost.goalQ, k);

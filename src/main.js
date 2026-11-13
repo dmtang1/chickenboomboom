@@ -41,7 +41,7 @@ const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xc5e8ff, 24, 78);
 const toyFog = scene.fog;
 const stairsFog = new THREE.Fog(0xffc9a0, 16, 76);
-const cityFog = new THREE.Fog(0xf6c59a, 56, 160);
+const cityFog = new THREE.Fog(0xf6c59a, 64, 200);
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 260);
 
 const art = createArt(renderer);
@@ -104,9 +104,13 @@ const guestDolls = new Map();
 const poseViews = new Map();
 const dollLabels = new WeakMap();
 let pendingSnap = null;
+let shownSnap = null;
 let guestJump = false;
+let guestDrop = false;
+let sentSwing = false;
 let netAcc = 0;
 let netBusy = false;
+let netPending = null;
 let inputAcc = 0;
 let localGait = 0;
 let menuOpen = true;
@@ -133,6 +137,7 @@ let faceYaw = 0;
 let walkPhase = 0;
 let ragdollHit = false;
 let hitStyle = null;
+const mateKnocks = [];
 let fallLock = 0;
 let lastFlailAt = 0;
 let flails = 0;
@@ -462,6 +467,15 @@ jumpBtn.addEventListener('pointerup', releaseJump);
 jumpBtn.addEventListener('pointercancel', releaseJump);
 
 const flailBtn = document.querySelector('#btn-flail');
+const nestBtn = document.querySelector('#btn-nest');
+const markerRoot = document.querySelector('#friend-markers');
+const markerPool = new Map();
+const markerVec = new THREE.Vector3();
+const camRight = new THREE.Vector3();
+const camUp = new THREE.Vector3();
+const camForward = new THREE.Vector3();
+let lastNestAt = 0;
+let guestNest = false;
 flailBtn.addEventListener('pointerdown', (e) => {
   e.preventDefault();
   e.stopPropagation();
@@ -477,6 +491,11 @@ flailBtn.addEventListener('pointerdown', (e) => {
 });
 flailBtn.addEventListener('pointerup', releaseFlail);
 flailBtn.addEventListener('pointercancel', releaseFlail);
+nestBtn.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  tryNest();
+});
 
 const stick = document.querySelector('#stick');
 const knob = document.querySelector('#knob');
@@ -607,15 +626,19 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyF' || e.code === 'KeyJ' || e.code === 'KeyK') tryFlail(null, true);
   if (e.code === 'KeyE' || e.code === 'Slash' || e.key === '?') trySwing(true);
   if (e.code === 'KeyY' && streetLevel()) {
-    const dropped = streets.putDown();
-    if (dropped) {
-      callout('DOWN');
-      sfx.drop();
-      streetHint();
+    if (netRole === 'guest') guestDrop = true;
+    else {
+      const dropped = streets.putDown();
+      if (dropped) {
+        callout('DOWN');
+        sfx.drop();
+        streetHint();
+      }
     }
   }
   if (e.code === 'Space') tryJump();
   if (e.code === 'KeyR') resetRagdoll();
+  if (e.code === 'KeyH') tryNest();
   if (e.code === 'KeyG') toggleGravity();
   if (e.code === 'KeyT') {
     const p = ragdoll.torso.body.position;
@@ -702,7 +725,7 @@ function step(dt) {
     if (!cuffed && (gp.flail || flailHeld || keys.has('KeyF') || keys.has('KeyJ') || keys.has('KeyK'))) {
       tryFlail(null, false);
     }
-    if (!cuffed && (swingHeld || keys.has('KeyE') || keys.has('Slash'))) trySwing(false);
+    if (!cuffed && (swingHeld || gp.swing || keys.has('KeyE') || keys.has('Slash'))) trySwing(false);
     if (!cuffed && gp.jump && !gpJumpWas) tryJump();
     gpJumpWas = !!gp.jump;
     if (ragdoll.isSupported(world)) {
@@ -851,12 +874,7 @@ function step(dt) {
 
   if (streetLevel()) poseRemotes(dt);
 
-  if (streetLevel() && ragdollHit && !streets.locked()) {
-    ragdoll.knock(hitStyle || undefined);
-    ragdollHit = false;
-    hitStyle = null;
-    tumbleGrip(true);
-  }
+  if (streetLevel()) flushHits();
 
   const blown = ragdoll.spread() > (streetLevel() ? 9 : 4.5);
   if (!Number.isFinite(torso.position.x) || blown) {
@@ -1673,6 +1691,7 @@ function launchLevel() {
     up: 3,
   });
   badgeTray.hidden = streetLevel();
+  nestBtn.hidden = !streetLevel();
   updateScoreHud(false);
   if (netRole === 'guest') {
     streets.setMirror(true);
@@ -1747,7 +1766,10 @@ function arrive(gate) {
 }
 
 function streetHint() {
-  let line = 'Bright doors open · green EXIT lets you out · Space hops into a car';
+  const held = heldWeaponName();
+  let line = held
+    ? `${held} · E hits · Y drops · jump stands you back up`
+    : 'Bright doors open · green EXIT lets you out · Space hops into a car · H nest';
   if (streets.driving()) {
     line = 'Driving · WASD steers · Space hops out · E honks · F boosts';
   } else if (streets.canHopIn()) {
@@ -1761,6 +1783,15 @@ function streetHint() {
     else if (heat === 'wanted') line = 'Wanted · police are coming';
   }
   setHint(line);
+}
+
+function heldWeaponName() {
+  const mine = streets.weaponLabel();
+  if (mine) return mine;
+  if (netRole !== 'guest' || !pendingSnap) return '';
+  const pose = (pendingSnap.players || []).find((person) => person.id === selfPeerId);
+  if (!pose || pose.arm == null || pose.arm < 0) return '';
+  return streets.weaponName(pose.arm);
 }
 
 function streetVictim(e) {
@@ -1790,6 +1821,7 @@ function onStreetEvent(e) {
       honk: !!e.honk,
       bawk: !!e.bawk,
       shake: e.shake || 0,
+      pickup: !!e.pickup,
       who: victim ? dollPeerId(victim) : '',
       impact: victim ? (e.impact || 0) : 0,
       boom: !!(victim && e.boom),
@@ -1825,13 +1857,32 @@ function onStreetEvent(e) {
     if (e.pickup) sfx.pickup();
     streetHint();
   }
-  if (e.hit) {
-    const who = e.who || ragdoll;
-    if (who === ragdoll) {
-      ragdollHit = true;
-      hitStyle = e.style || null;
-    } else who.knock(e.style || undefined);
+  if (e.hit) noteHit(e.who || ragdoll, e.style);
+}
+
+function noteHit(doll, style) {
+  if (!doll || doll === ragdoll) {
+    ragdollHit = true;
+    hitStyle = style || null;
+    return;
   }
+  const pending = mateKnocks.find((hit) => hit.doll === doll);
+  if (pending) pending.style = style || null;
+  else mateKnocks.push({ doll, style: style || null });
+}
+
+function flushHits() {
+  if (streets.locked()) return;
+  if (ragdollHit) {
+    ragdoll.knock(hitStyle || undefined);
+    ragdollHit = false;
+    hitStyle = null;
+    tumbleGrip(true);
+  }
+  for (const hit of mateKnocks) {
+    if (hit.doll.torso.body.world) hit.doll.knock(hit.style || undefined);
+  }
+  mateKnocks.length = 0;
 }
 
 function onStairEvent(e) {
@@ -1901,8 +1952,8 @@ function updateCamera(dt, torso) {
   const indoor = streetLevel() && streets.indoor();
   const room = indoor ? streets.roomView() : null;
   if (streetLevel() && scene.fog) {
-    const fogNear = indoor ? 28 : 56;
-    const fogFar = indoor ? 90 : 160;
+    const fogNear = indoor ? 28 : 64;
+    const fogFar = indoor ? 90 : 200;
     if (scene.fog.near !== fogNear || scene.fog.far !== fogFar) {
       scene.fog.near = fogNear;
       scene.fog.far = fogFar;
@@ -1965,6 +2016,11 @@ function updateCamera(dt, torso) {
     }
   }
   camera.lookAt(look);
+  try {
+    updateFriendMarkers();
+  } catch (error) {
+    console.error(error);
+  }
   if (shakeMag > 0) {
     camera.position.x += (Math.random() - 0.5) * shakeMag;
     camera.position.y += (Math.random() - 0.5) * shakeMag * 0.65;
@@ -2082,7 +2138,7 @@ function pinchDistance() {
 }
 
 function pollGamepad() {
-  const out = { x: 0, y: 0, lookX: 0, lookY: 0, flail: false, jump: false };
+  const out = { x: 0, y: 0, lookX: 0, lookY: 0, flail: false, jump: false, swing: false };
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const gp = pads && pads[0];
   if (!gp) return out;
@@ -2092,8 +2148,9 @@ function pollGamepad() {
   if (Math.abs(gp.axes[2] || 0) > dead) out.lookX = gp.axes[2];
   if (Math.abs(gp.axes[3] || 0) > dead) out.lookY = gp.axes[3];
   out.jump = !!gp.buttons[0]?.pressed;
+  out.swing = !!gp.buttons[2]?.pressed || !!gp.buttons[5]?.pressed;
   for (let i = 0; i < gp.buttons.length; i++) {
-    if (i === 0 || i === 8 || i === 9 || (i >= 12 && i <= 15)) continue;
+    if (i === 0 || i === 2 || i === 5 || i === 8 || i === 9 || (i >= 12 && i <= 15)) continue;
     if (gp.buttons[i].pressed) out.flail = true;
   }
   if (gp.buttons[14]?.pressed) out.x -= 1;
@@ -2287,6 +2344,8 @@ try {
 if (nameInput) {
   nameInput.addEventListener('input', () => {
     try { sessionStorage.setItem('ragdoll-name', nameInput.value); } catch { /* private mode */ }
+    if (netRole === 'guest') announceName();
+    else if (netRole === 'host') broadcastRoster();
   });
 }
 
@@ -2405,6 +2464,11 @@ function netSend(data, target) {
   if (session) session.send(data, target);
 }
 
+function announceName() {
+  if (netRole !== 'guest' || !session) return;
+  netSend({ t: 'hi', name: myName() });
+}
+
 function renderFriends() {
   const box = document.querySelector('#room-friends');
   if (!box) return;
@@ -2466,8 +2530,10 @@ function spawnMate(peer) {
   const doll = createRagdoll(world, scene, art, ragMat, peer.color);
   doll.setCostume('chicken');
   doll.setWalker(true);
-  const spot = ragdoll.walking() ? ragdoll.mover().position : ragdoll.torso.body.position;
-  doll.place(spot.x + 1.7 * peer.slot, ragdoll.torso.spawn.y, spot.z + 0.8);
+  const here = ragdoll.walking() ? ragdoll.mover().position : ragdoll.torso.body.position;
+  const spot = streets.indoor() ? here : streets.respawn(here);
+  const aside = streets.indoor() ? peer.slot * 0.8 : peer.slot * 1.1;
+  doll.place(spot.x, ragdoll.torso.spawn.y, spot.z + aside);
   doll.mover().material = streets.walkerMaterial();
   for (const part of doll.parts) {
     part.body.linearDamping = 0.14;
@@ -2529,6 +2595,161 @@ function hopDoll(peer) {
   torso.wakeUp();
 }
 
+function tryNest() {
+  if (!started || menuOpen || !streetLevel()) return;
+  if (performance.now() - lastNestAt < 600) return;
+  if (netRole === 'guest') {
+    guestNest = true;
+    lastNestAt = performance.now();
+    return;
+  }
+  if (streets.locked() || !streets.stepOut()) {
+    callout('BUSTED');
+    return;
+  }
+  lastNestAt = performance.now();
+  dropAtNest(ragdoll, 0);
+  standChicken();
+  faceYaw = Math.PI;
+  callout('NEST!');
+  sfx.bawk();
+  const p = ragdoll.mover().position;
+  particles.burst(p.x, p.y + 0.4, p.z, {
+    colors: [0xffd84a, 0xfff6d0, 0x6bcb77, 0xffffff],
+    count: 16,
+    speed: 3.4,
+    life: 0.4,
+    gravity: 6,
+    up: 2,
+  });
+}
+
+function dropAtNest(doll, slot) {
+  if (!doll) return;
+  const spot = streets.corner();
+  doll.setWalker(true);
+  doll.place(spot.x + slot * 1.15, doll.torso.spawn.y, spot.z);
+  const mover = doll.mover();
+  mover.material = streets.walkerMaterial();
+  mover.velocity.set(0, 0, 0);
+}
+
+function mateArrow() {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'mate-arrow');
+  svg.setAttribute('viewBox', '0 0 48 28');
+  const shaft = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  shaft.setAttribute('d', 'M4 14h20');
+  const head = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+  head.setAttribute('d', 'M18 5.5 40 14 18 22.5');
+  svg.append(shaft, head);
+  return svg;
+}
+
+function updateFriendMarkers() {
+  if (!markerRoot) return;
+  const active = new Set();
+  const playing = started && streetLevel();
+  if (playing) {
+    camera.updateMatrixWorld();
+    const basis = camera.matrixWorld.elements;
+    camRight.set(basis[0], basis[1], basis[2]);
+    camUp.set(basis[4], basis[5], basis[6]);
+    camForward.set(-basis[8], -basis[9], -basis[10]);
+    const mine = ragdoll.walking() ? ragdoll.mover().position : ragdoll.torso.body.position;
+    const mates = [];
+    if (netRole === 'guest') {
+      for (const [id, doll] of guestDolls) {
+        const body = doll.walking() ? doll.mover() : doll.torso.body;
+        const sprite = dollLabels.get(doll);
+        mates.push({ id, name: sprite?.userData.text || 'Friend', body });
+      }
+    } else {
+      for (const peer of roster.values()) {
+        if (!peer.doll) continue;
+        const body = peer.doll.walking() ? peer.doll.mover() : peer.doll.torso.body;
+        mates.push({ id: peer.id, name: peer.name || 'Friend', body });
+      }
+    }
+    const w = markerRoot.clientWidth || window.innerWidth;
+    const h = markerRoot.clientHeight || window.innerHeight;
+    const viewLimit = 0.62;
+    for (const mate of mates) {
+      if (!mate.body) continue;
+      active.add(mate.id);
+      const wx = mate.body.position.x;
+      const wy = mate.body.position.y + 1.3;
+      const wz = mate.body.position.z;
+      const dx = wx - camera.position.x;
+      const dy = wy - camera.position.y;
+      const dz = wz - camera.position.z;
+      const depth = dx * camForward.x + dy * camForward.y + dz * camForward.z;
+      const behind = depth < 0.8;
+      let nx;
+      let ny;
+      if (behind) {
+        const rx = dx * camRight.x + dy * camRight.y + dz * camRight.z;
+        const uy = dx * camUp.x + dy * camUp.y + dz * camUp.z;
+        const span = Math.max(Math.hypot(rx, uy), 0.001);
+        nx = (rx / span) * 1.6;
+        ny = (uy / span) * 1.6;
+      } else {
+        markerVec.set(wx, wy, wz);
+        markerVec.project(camera);
+        nx = markerVec.x;
+        ny = markerVec.y;
+      }
+      const meters = Math.max(1, Math.round(Math.hypot(wx - mine.x, wz - mine.z)));
+      const onScreen = !behind && Math.abs(nx) < viewLimit && Math.abs(ny) < viewLimit;
+      let el = markerPool.get(mate.id);
+      if (!el || !el.querySelector('svg.mate-arrow')) {
+        if (el) el.remove();
+        el = document.createElement('div');
+        el.className = 'mate';
+        const label = document.createElement('b');
+        el.append(label, mateArrow());
+        markerRoot.appendChild(el);
+        markerPool.set(mate.id, el);
+      }
+      if (onScreen && meters < 18) {
+        el.hidden = true;
+        continue;
+      }
+      const offscreen = behind || Math.abs(nx) > 0.9 || Math.abs(ny) > 0.9;
+      if (offscreen) {
+        const scale = 0.9 / Math.max(Math.abs(nx), Math.abs(ny), 0.001);
+        nx *= scale;
+        ny *= scale;
+      }
+      let px = (nx * 0.5 + 0.5) * w;
+      let py = (-ny * 0.5 + 0.5) * h;
+      const angle = Math.atan2(py - h / 2, px - w / 2);
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      el.hidden = false;
+      el.querySelector('b').textContent = `${mate.name} ${meters}m`;
+      if (Math.abs(cos) >= Math.abs(sin)) el.style.flexDirection = cos > 0 ? 'row' : 'row-reverse';
+      else el.style.flexDirection = sin > 0 ? 'column' : 'column-reverse';
+      el.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
+      const halfW = el.offsetWidth / 2;
+      const halfH = el.offsetHeight / 2;
+      const minX = 16 + halfW;
+      const maxX = w - 16 - halfW;
+      const minY = 168 + halfH;
+      const maxY = h - 156 - halfH;
+      if (maxX > minX) px = Math.min(maxX, Math.max(minX, px));
+      if (maxY > minY) py = Math.min(maxY, Math.max(minY, py));
+      el.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
+      el.querySelector('.mate-arrow').style.transform = `rotate(${angle}rad)`;
+    }
+  }
+  for (const [id, el] of markerPool) {
+    if (active.has(id)) continue;
+    el.remove();
+    markerPool.delete(id);
+  }
+}
+
 function rescueMate(peer) {
   if (!peer.doll) return;
   const spot = streets.respawn(ragdoll.mover().position);
@@ -2543,6 +2764,7 @@ function driveRemotes() {
   for (const peer of roster.values()) {
     const doll = peer.doll;
     if (!doll) continue;
+    if (peer.swing && doll) streets.swingArm(doll);
     if (doll.isSupported(world)) peer.air = 2;
     if (peer.jump && now - peer.lastJump > 280) {
       peer.lastJump = now;
@@ -2593,8 +2815,15 @@ function poseRemotes(dt) {
       while (turn < -Math.PI) turn += Math.PI * 2;
       peer.faceYaw = (peer.faceYaw || 0) + turn * (1 - Math.exp(-12 * dt));
     }
-    doll.poseWalker(peer.faceYaw || 0, peer.walkPhase || 0, gait, dt, 0);
+    doll.poseWalker(peer.faceYaw || 0, peer.walkPhase || 0, gait, dt, streetLevel() ? streets.chopOf(doll) : 0);
   }
+}
+
+function stampArm(pose, doll) {
+  if (!streetLevel() || !pose || !doll) return;
+  const arm = streets.armState(doll);
+  pose.arm = arm ? arm.index : -1;
+  pose.chop = arm ? arm.chop : 0;
 }
 
 function capturePlayers() {
@@ -2609,6 +2838,7 @@ function capturePlayers() {
     self.gait = Math.round(localGait * 100) / 100;
     self.yaw = Math.round(faceYaw * 1000) / 1000;
   }
+  stampArm(self, ragdoll);
   players.push(self);
   for (const peer of roster.values()) {
     if (!peer.doll) continue;
@@ -2622,33 +2852,50 @@ function capturePlayers() {
       pose.gait = Math.round((peer.gait || 0) * 100) / 100;
       pose.yaw = Math.round((peer.faceYaw || pose.yaw || 0) * 1000) / 1000;
     }
+    stampArm(pose, peer.doll);
     players.push(pose);
   }
   return players;
 }
 
 function publishNet(dt) {
-  if (netRole !== 'host' || !started || !session || netBusy) return;
+  if (netRole !== 'host' || !started || !session) return;
   netAcc += dt;
-  if (netAcc < 0.1) return;
+  if (netAcc < 1 / 20) return;
   netAcc = 0;
   let packet;
   try {
+    const city = streetLevel() ? streets.capture() : null;
+    if (city) city.time = Math.round(simTime * 1000) / 1000;
     packet = {
       t: 'snap',
       score,
       players: capturePlayers(),
-      city: streetLevel() ? streets.capture() : null,
+      city,
     };
   } catch (error) {
     console.error(error);
     return;
   }
+  if (netBusy) {
+    netPending = packet;
+    return;
+  }
+  flushNet(packet);
+}
+
+function flushNet(packet) {
+  if (!session) return;
   netBusy = true;
   Promise.resolve(session.send(packet)).then(() => {
     netBusy = false;
+    if (!netPending || !session) return;
+    const next = netPending;
+    netPending = null;
+    flushNet(next);
   }, (error) => {
     netBusy = false;
+    netPending = null;
     console.error(error);
   });
   refreshNetBadge();
@@ -2691,7 +2938,7 @@ function applyPlayers(players, dt, hard) {
         if (streetLevel()) doll.mover().material = streets.walkerMaterial();
       }
       doll.plant(view.x, view.y, view.z);
-      doll.poseWalker(view.yaw, view.phase || 0, pose.gait || 0, dt, 0);
+      doll.poseWalker(view.yaw, view.phase || 0, pose.gait || 0, dt, pose.chop || 0);
     } else if (pose.parts) doll.applyParts(pose.parts);
   }
   for (const [id, doll] of guestDolls) {
@@ -2706,6 +2953,7 @@ function playNetFx(data) {
   const mine = !data.who || data.who === selfPeerId;
   if (mine && data.honk) sfx.honk();
   if (mine && data.bawk) sfx.bawk();
+  if (mine && data.pickup) sfx.pickup();
   if (mine && data.boom) sfx.boom();
   else if (mine && data.who && data.impact) sfx.impact(data.impact);
   if (data.callout) callout(data.callout);
@@ -2730,9 +2978,15 @@ function sendInput(dt, gp) {
   if (netRole !== 'guest' || !session || !started) return;
   inputAcc += dt;
   const jump = guestJump;
-  if (!jump && inputAcc < 1 / 15) return;
+  const nest = guestNest;
+  const drop = guestDrop;
+  const swing = !menuOpen && streetLevel() && (swingHeld || gp.swing || keys.has('KeyE') || keys.has('Slash'));
+  if (!jump && !nest && !drop && swing === sentSwing && inputAcc < 1 / 15) return;
   inputAcc = 0;
   guestJump = false;
+  guestNest = false;
+  guestDrop = false;
+  sentSwing = swing;
   const wish = menuOpen ? { x: 0, z: 0 } : wishVector(gp);
   const flail = !menuOpen && (flailHeld || keys.has('KeyF') || keys.has('KeyJ') || keys.has('KeyK') || gp.flail);
   netSend({
@@ -2741,6 +2995,9 @@ function sendInput(dt, gp) {
     z: Math.round(wish.z * 100) / 100,
     f: flail ? 1 : 0,
     j: jump ? 1 : 0,
+    n: nest ? 1 : 0,
+    s: swing ? 1 : 0,
+    y: drop ? 1 : 0,
   });
 }
 
@@ -2763,9 +3020,13 @@ function stepGuest(dt) {
   sendInput(dt, gp);
   let hard = false;
   if (pendingSnap && started && streetLevel()) {
-    hard = !!streets.present(pendingSnap.city);
+    if (pendingSnap !== shownSnap) {
+      hard = !!streets.present(pendingSnap.city);
+      shownSnap = pendingSnap;
+    }
     applyPlayers(pendingSnap.players, dt, hard);
-  }
+    streets.wearPlayers(pendingSnap.players, (id) => (id === selfPeerId ? ragdoll : guestDolls.get(id)));
+  } else streets.wearPlayers([], () => null);
   if (started && streetLevel()) {
     streets.glide(dt);
     streets.tick(dt);
@@ -2804,7 +3065,10 @@ function onNetMessage(data, peerId) {
       peer.wishX = Number(data.x) || 0;
       peer.wishZ = Number(data.z) || 0;
       peer.flail = !!data.f;
+      peer.swing = !!data.s;
       if (data.j) peer.jump = true;
+      if (data.y && peer.doll && streetLevel()) streets.dropArm(peer.doll);
+      if (data.n && peer.doll && streetLevel() && !streets.locked()) dropAtNest(peer.doll, peer.slot);
     } else if (data.t === 'toys' && peer.doll && streetLevel()) {
       streets.dumpToys(peer.doll.mover().position);
     } else if (data.t === 'reset' && peer.doll && streetLevel()) {
@@ -2824,6 +3088,8 @@ function onNetMessage(data, peerId) {
     }
     const box = document.querySelector('#room-friends');
     if (box) box.textContent = lines.join(' · ');
+    const mine = (data.people || []).find((person) => person.id && person.id === selfPeerId);
+    if (mine && mine.name !== myName()) announceName();
     refreshNetBadge();
   } else if (data.t === 'go') {
     hostPeerId = peerId;
@@ -2844,6 +3110,10 @@ function onNetMessage(data, peerId) {
 }
 
 function onPeerJoin(peerId) {
+  if (netRole === 'guest') {
+    announceName();
+    return;
+  }
   if (netRole !== 'host' || peerId === selfPeerId) return;
   if (roster.has(peerId)) return;
   const slot = nextSlot();
@@ -2857,6 +3127,7 @@ function onPeerJoin(peerId) {
     wishZ: 0,
     jump: false,
     flail: false,
+    swing: false,
     lastJump: 0,
     lastFlail: 0,
     air: 2,
@@ -2887,7 +3158,10 @@ function onPeerLeave(peerId) {
   }
   const peer = roster.get(peerId);
   if (!peer) return;
-  if (peer.doll) peer.doll.dispose();
+  if (peer.doll) {
+    if (streetLevel()) streets.dropArm(peer.doll);
+    peer.doll.dispose();
+  }
   roster.delete(peerId);
   syncActors();
   broadcastRoster();
@@ -2899,6 +3173,8 @@ async function leaveOnline() {
   netRole = null;
   hostPeerId = '';
   pendingSnap = null;
+  shownSnap = null;
+  netPending = null;
   for (const peer of roster.values()) {
     if (peer.doll) peer.doll.dispose();
   }
@@ -2913,6 +3189,7 @@ async function leaveOnline() {
   myColor = FEATHERS[0];
   ragdoll.recolor(myColor);
   streets.setMirror(false);
+  streets.setShared(false);
   refreshNetBadge();
   if (role === 'guest') {
     started = false;
@@ -2944,6 +3221,7 @@ async function openRoom(code, role) {
     });
     await session.ready;
     selfPeerId = await session.selfId();
+    streets.setShared(true);
   } catch (error) {
     netRole = null;
     session = null;
@@ -2962,7 +3240,7 @@ async function openRoom(code, role) {
   } else {
     document.querySelector('#btn-room-play').hidden = true;
     setRoomStatus('Connected. Waiting for the host to start.');
-    netSend({ t: 'hi', name: myName() });
+    announceName();
   }
   refreshNetBadge();
 }
