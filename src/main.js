@@ -966,7 +966,10 @@ function steer(dt, gp) {
     if (keys.has('KeyS')) gas -= 1;
     if (keys.has('KeyA')) turn += 1;
     if (keys.has('KeyD')) turn -= 1;
-    streets.pilot(clamp(gas - gp.y, -1, 1), clamp(turn - gp.x, -1, 1));
+    streets.pilot(
+      clamp(gas - stickVec.y - gp.y, -1, 1),
+      clamp(turn - stickVec.x - gp.x, -1, 1),
+    );
     return;
   }
   if (streetBounce > 0) return;
