@@ -521,12 +521,81 @@ h1 {
 
 .lede { margin: 12px 0 0; font-size: 16px; }
 
-#btn-play {
+#btn-play, #btn-friends, #btn-main-menu, #btn-room-play, #btn-host {
   width: 100%;
-  margin-top: 18px;
+  margin-top: 12px;
   font-size: 22px;
   padding: 14px 16px;
   background: #ffe08a;
+}
+
+#btn-play { margin-top: 18px; }
+
+#btn-friends { background: #c5e8ff; }
+
+#btn-main-menu { background: white; }
+
+#room-panel { margin-top: 14px; }
+
+.room-name {
+  display: block;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.room-name input, #join-code {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  font: inherit;
+  font-weight: 700;
+  color: var(--ink);
+  background: white;
+  border: 3px solid var(--ink);
+  border-radius: 12px;
+  padding: 8px 10px;
+  touch-action: auto;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+#room-status { margin: 12px 0 0; font-size: 15px; }
+
+#room-code-line {
+  margin: 12px 0 0;
+  font-size: 18px;
+  letter-spacing: 0.14em;
+}
+
+#room-code-line b { font-size: 28px; }
+
+#room-code-line button, #btn-room-leave, #join-form button {
+  margin-left: 8px;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+}
+
+#room-friends { margin-top: 8px; font-weight: 700; }
+
+#join-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#join-form input { flex: 1; margin-top: 0; text-transform: uppercase; }
+
+#btn-room-leave {
+  width: 100%;
+  margin: 10px 0 0;
+  background: white;
+}
+
+#net-badge {
+  background: #c5e8ff;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
 }
 
 .card ul {

@@ -5,6 +5,7 @@ import { createArt } from './art.js';
 import { createAudio } from './audio.js';
 import { createParticles } from './particles.js';
 import { createProps } from './props.js';
+import { connectRoom } from './net.js';
 import { createRagdoll } from './ragdoll.js';
 import { createStairs } from './stairs.js';
 import { createStreets } from './streets.js';
@@ -40,7 +41,7 @@ const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xc5e8ff, 24, 78);
 const toyFog = scene.fog;
 const stairsFog = new THREE.Fog(0xffc9a0, 16, 76);
-const cityFog = new THREE.Fog(0xf6c59a, 14, 64);
+const cityFog = new THREE.Fog(0xf6c59a, 56, 160);
 const camera = new THREE.PerspectiveCamera(52, window.innerWidth / window.innerHeight, 0.1, 260);
 
 const art = createArt(renderer);
@@ -90,6 +91,24 @@ let score = 0;
 let best = save.best || 0;
 let bestDrop = save.bestDrop || 0;
 let levelId = 'chicken';
+const FEATHERS = [0xffd84a, 0xff5d73, 0x7ec8ff, 0x6bcb77, 0xc77dff, 0xff922b, 0xfff3bf, 0x4ecdc4];
+let netRole = null;
+let session = null;
+let selfPeerId = '';
+let hostPeerId = '';
+let myColor = FEATHERS[0];
+let roomCode = '';
+const roster = new Map();
+const pendingNames = new Map();
+const guestDolls = new Map();
+const poseViews = new Map();
+const dollLabels = new WeakMap();
+let pendingSnap = null;
+let guestJump = false;
+let netAcc = 0;
+let netBusy = false;
+let inputAcc = 0;
+let localGait = 0;
 let menuOpen = true;
 let nextMark = 50;
 let streak = 0;
@@ -355,7 +374,7 @@ world.addEventListener('beginContact', (e) => {
   const b = e.bodyB;
   const rag = a.gameRole === 'ragdoll' ? a : b.gameRole === 'ragdoll' ? b : null;
   const other = rag === a ? b : rag ? a : null;
-  if (!rag || !other) return;
+  if (!rag || !other || (rag.doll && rag.doll !== ragdoll)) return;
   if (other.gameRole !== 'static' && other.gameRole !== 'tramp') return;
   const speed = Math.abs(rag.velocity.y);
   const now = performance.now();
@@ -381,11 +400,18 @@ playBtn.addEventListener('click', () => {
     sfx.ui();
     return;
   }
-  launchLevel();
-  sfx.ui();
+  void leaveOnline().then(() => {
+    launchLevel();
+    sfx.ui();
+  });
 });
 document.querySelector('#btn-toys').addEventListener('click', () => {
   if (!started || menuOpen) return;
+  if (netRole === 'guest') {
+    netSend({ t: 'toys' });
+    sfx.ui();
+    return;
+  }
   const p = ragdoll.torso.body.position;
   if (fallLevel()) stairs.dumpToys(p);
   else if (streetLevel()) streets.dumpToys(p);
@@ -397,11 +423,20 @@ document.querySelector('#btn-toys').addEventListener('click', () => {
 });
 document.querySelector('#btn-reset').addEventListener('click', () => {
   if (!started) return;
+  if (netRole === 'guest') {
+    netSend({ t: 'reset' });
+    sfx.ui();
+    return;
+  }
   resetRagdoll();
   sfx.ui();
 });
 gravBtn.addEventListener('click', () => {
   if (!started) return;
+  if (netRole === 'guest') {
+    netSend({ t: 'grav' });
+    return;
+  }
   toggleGravity();
 });
 muteBtn.addEventListener('click', () => {
@@ -551,11 +586,13 @@ document.addEventListener('touchend', (e) => {
 }, { passive: false, capture: true });
 
 window.addEventListener('keydown', (e) => {
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
   if (['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
   if (menuOpen) {
     if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault();
-      playBtn.click();
+      if (netRole === 'host' && !roomPanelHidden()) startTogether();
+      else if (netRole !== 'guest') playBtn.click();
     }
     if (e.code === 'Escape' && started) closeMenu();
     return;
@@ -635,9 +672,13 @@ renderer.setAnimationLoop((now) => {
 function step(dt) {
   frameCount += 1;
   popupsThisFrame = 0;
-  if (menuOpen && started) {
+  if (netRole === 'guest') {
+    stepGuest(dt);
+    return;
+  }
+  if (menuOpen && started && netRole !== 'host') {
     const torso = ragdoll.torso.body;
-    ragdoll.sync(simTime, charge, maxChaosTimer > 0);
+    syncDolls(simTime);
     if (fallLevel()) stairs.sync(dt, torso);
     else if (streetLevel()) streets.sync();
     else arena.sync(dt, simTime);
@@ -657,6 +698,7 @@ function step(dt) {
   else {
     const cuffed = streetLevel() && streets.locked();
     if (!trapped && !cuffed) steer(dt, gp);
+    driveRemotes(dt);
     if (!cuffed && (gp.flail || flailHeld || keys.has('KeyF') || keys.has('KeyJ') || keys.has('KeyK'))) {
       tryFlail(null, false);
     }
@@ -740,6 +782,7 @@ function step(dt) {
       if (streetLevel()) streets.prePhysics(fixed);
     arena.prePhysics(fixed, simTime, started ? torso : null, launchLock);
     ragdoll.lockWalker();
+    for (const peer of roster.values()) peer.doll?.lockWalker();
     if (streetBounce > 0 && ragdoll.walking()) {
       const mover = ragdoll.mover();
       mover.velocity.x = 0;
@@ -756,6 +799,7 @@ function step(dt) {
   const linCap = maxChaosTimer > 0 ? 40 : launchLock > 0 && levelId === 'toybox' ? 42 : levelId === 'chicken' ? 36 : levelId === 'straight' ? 16 : levelId === 'stairs' ? 24 : 26;
   const angCap = maxChaosTimer > 0 ? 26 : levelId === 'chicken' ? 24 : fastFall ? 22 : 18;
   ragdoll.clampSpeeds(linCap, angCap);
+  for (const peer of roster.values()) peer.doll?.clampSpeeds(linCap, angCap);
 
   if (streetLevel()) streets.tick(dt);
   if (streetLevel() && ragdoll.walking()) {
@@ -765,11 +809,13 @@ function step(dt) {
       if (view) {
         faceYaw = view.yaw;
         walkPhase += Math.abs(view.speed) * 0.65 * dt;
-        ragdoll.poseWalker(faceYaw, walkPhase, Math.min(0.5, Math.abs(view.speed) / 30), dt, 0);
+        localGait = Math.min(0.5, Math.abs(view.speed) / 30);
+        ragdoll.poseWalker(faceYaw, walkPhase, localGait, dt, 0);
       }
     } else if (streets.locked()) {
       const face = streets.rideYaw();
       if (face != null) faceYaw = face;
+      localGait = 0;
       ragdoll.poseWalker(faceYaw, walkPhase, 0, dt, 0);
     } else {
     const freshBounce = streetBounce <= 0;
@@ -790,6 +836,7 @@ function step(dt) {
     const speed = Math.hypot(mover.velocity.x, mover.velocity.z);
     const grounded = ragdoll.isSupported(world);
     const gait = !grounded ? 0.12 : speed < 0.35 ? 0 : Math.min(1, 0.55 + speed / 10);
+    localGait = gait;
     walkPhase += Math.max(speed * 0.85, gait > 0 ? 3.1 : 0) * dt;
     if (speed > 0.45 && streetBounce <= 0 && launchLock <= 0) {
       const target = Math.atan2(mover.velocity.x, mover.velocity.z);
@@ -801,6 +848,8 @@ function step(dt) {
     ragdoll.poseWalker(faceYaw, walkPhase, gait, dt, streets.chop());
     }
   }
+
+  if (streetLevel()) poseRemotes(dt);
 
   if (streetLevel() && ragdollHit && !streets.locked()) {
     ragdoll.knock(hitStyle || undefined);
@@ -885,7 +934,7 @@ function step(dt) {
     updateComboHud();
   }
 
-  ragdoll.sync(simTime, charge, maxChaosTimer > 0);
+  syncDolls(simTime);
   arena.sync(dt, simTime);
   if (fallLevel()) stairs.sync(dt, torso);
   if (streetLevel()) streets.sync();
@@ -915,6 +964,7 @@ function step(dt) {
   updateCamera(dt, torso);
   updateHud();
   popups.update(dt);
+  publishNet(dt);
 }
 
 const balanceUp = new CANNON.Vec3();
@@ -1024,6 +1074,10 @@ function hopBody(torso, hop) {
 
 function tryJump() {
   if (!started || menuOpen) return;
+  if (netRole === 'guest') {
+    guestJump = true;
+    return;
+  }
   if (streetLevel() && streets.locked()) return;
   const now = performance.now();
   if (now - lastJumpAt < 280) return;
@@ -1095,6 +1149,7 @@ function tryJump() {
 }
 
 function trySwing(tapped) {
+  if (netRole === 'guest') return;
   if (!started || !streetLevel() || streets.locked()) return;
   if (streets.driving()) {
     if (tapped) streets.honk();
@@ -1108,6 +1163,7 @@ function trySwing(tapped) {
 }
 
 function tryFlail(body, tapped) {
+  if (netRole === 'guest') return;
   if (!started) return;
   if (streetLevel() && streets.locked()) return;
   if (streetLevel() && streets.driving()) {
@@ -1474,13 +1530,13 @@ function applyLook(mode) {
     blob.visible = false;
   } else if (mode === 'chicken') {
     scene.fog = cityFog;
-    camera.far = 180;
+    camera.far = 260;
     sun.shadow.camera.near = 2;
-    sun.shadow.camera.far = 80;
-    sun.shadow.camera.left = -32;
-    sun.shadow.camera.right = 32;
-    sun.shadow.camera.top = 32;
-    sun.shadow.camera.bottom = -32;
+    sun.shadow.camera.far = 140;
+    sun.shadow.camera.left = -78;
+    sun.shadow.camera.right = 78;
+    sun.shadow.camera.top = 78;
+    sun.shadow.camera.bottom = -78;
     blob.visible = true;
   } else {
     scene.fog = toyFog;
@@ -1618,6 +1674,15 @@ function launchLevel() {
   });
   badgeTray.hidden = streetLevel();
   updateScoreHud(false);
+  if (netRole === 'guest') {
+    streets.setMirror(true);
+    ragdoll.recolor(myColor);
+  }
+  if (netRole === 'host') {
+    for (const peer of roster.values()) spawnMate(peer);
+    syncActors();
+  }
+  refreshNetBadge();
 }
 
 function openMenu() {
@@ -1629,6 +1694,7 @@ function openMenu() {
   endStick();
   document.documentElement.removeAttribute('data-resume');
   playBtn.textContent = started ? 'BACK TO THE STREET' : 'PLAY';
+  syncMainMenuButton();
   splash.hidden = false;
 }
 
@@ -1639,10 +1705,25 @@ function closeMenu() {
 }
 
 function arrive(gate) {
-  ragdoll.place(gate.x, ragdoll.torso.spawn.y, gate.z);
-  standChicken();
-  faceYaw = gate.yaw;
-  ragdoll.poseWalker(faceYaw, walkPhase, 0, 0);
+  const dolls = [ragdoll];
+  for (const peer of roster.values()) if (peer.doll) dolls.push(peer.doll);
+  dolls.forEach((doll, index) => {
+    const side = (index - (dolls.length - 1) / 2) * 0.9;
+    const x = gate.x + Math.cos(gate.yaw) * side;
+    const z = gate.z - Math.sin(gate.yaw) * side;
+    doll.place(x, doll.torso.spawn.y, z);
+    doll.setWalker(true);
+    if (streetLevel()) doll.mover().material = streets.walkerMaterial();
+    if (doll === ragdoll) {
+      standChicken();
+      faceYaw = gate.yaw;
+      ragdoll.poseWalker(faceYaw, walkPhase, 0, 0);
+    } else {
+      const peer = [...roster.values()].find((entry) => entry.doll === doll);
+      if (peer) peer.faceYaw = gate.yaw;
+      doll.poseWalker(gate.yaw, 0, 0, 0, 0);
+    }
+  });
   const here = ragdoll.torso.body.position;
   look.set(here.x + panX, here.y + 0.9 + panY, here.z + panZ);
   streetBounce = 0;
@@ -1682,10 +1763,38 @@ function streetHint() {
   setHint(line);
 }
 
+function streetVictim(e) {
+  if (e.who) return e.who;
+  if (e.hit) return ragdoll;
+  return null;
+}
+
+function dollPeerId(doll) {
+  if (!doll || doll === ragdoll) return selfPeerId || 'host';
+  for (const peer of roster.values()) if (peer.doll === doll) return peer.id;
+  return '';
+}
+
 function onStreetEvent(e) {
-  if (e.honk) sfx.honk();
-  if (e.bawk) sfx.bawk();
-  if (e.launch) launchLock = Math.max(launchLock, e.launch);
+  const victim = streetVictim(e);
+  const hear = !victim || victim === ragdoll;
+  if (hear && e.honk) sfx.honk();
+  if (hear && e.bawk) sfx.bawk();
+  if (e.launch && (!e.who || e.who === ragdoll)) launchLock = Math.max(launchLock, e.launch);
+  if (netRole === 'host' && (e.callout || e.burst || e.honk || e.bawk || e.shake)) {
+    netSend({
+      t: 'fx',
+      callout: e.callout || '',
+      pos: e.pos || null,
+      burst: e.burst || '',
+      honk: !!e.honk,
+      bawk: !!e.bawk,
+      shake: e.shake || 0,
+      who: victim ? dollPeerId(victim) : '',
+      impact: victim ? (e.impact || 0) : 0,
+      boom: !!(victim && e.boom),
+    });
+  }
   if (e.callout) callout(e.callout);
   if (e.shake) shake(e.shake);
   if (e.score && e.pos) addScore(e.score, e.pos, e.impact || 6, e.flair || null);
@@ -1710,15 +1819,18 @@ function onStreetEvent(e) {
       up: e.burst === 'boom' ? 6 : e.burst === 'launch' ? 8 : e.burst === 'zap' ? 4 : 2.4,
     });
   }
-  if (e.boom) sfx.boom();
-  else if (e.score || e.crunch) sfx.impact(e.impact || 6);
+  if (hear && e.boom) sfx.boom();
+  else if (hear && (e.score || e.crunch)) sfx.impact(e.impact || 6);
   if (e.pickup || e.hint) {
     if (e.pickup) sfx.pickup();
     streetHint();
   }
   if (e.hit) {
-    ragdollHit = true;
-    hitStyle = e.style || null;
+    const who = e.who || ragdoll;
+    if (who === ragdoll) {
+      ragdollHit = true;
+      hitStyle = e.style || null;
+    } else who.knock(e.style || undefined);
   }
 }
 
@@ -1789,8 +1901,8 @@ function updateCamera(dt, torso) {
   const indoor = streetLevel() && streets.indoor();
   const room = indoor ? streets.roomView() : null;
   if (streetLevel() && scene.fog) {
-    const fogNear = indoor ? 26 : 14;
-    const fogFar = indoor ? 72 : 64;
+    const fogNear = indoor ? 28 : 56;
+    const fogFar = indoor ? 90 : 160;
     if (scene.fog.near !== fogNear || scene.fog.far !== fogFar) {
       scene.fog.near = fogNear;
       scene.fog.far = fogFar;
@@ -2164,4 +2276,750 @@ try {
     window.addEventListener('keydown', kick, { once: true });
   }
 } catch { /* private mode */ }
+
+const roomPanel = document.querySelector('#room-panel');
+const roomStatus = document.querySelector('#room-status');
+const nameInput = document.querySelector('#chick-name');
+try {
+  const savedName = sessionStorage.getItem('ragdoll-name');
+  if (savedName && nameInput) nameInput.value = savedName;
+} catch { /* private mode */ }
+if (nameInput) {
+  nameInput.addEventListener('input', () => {
+    try { sessionStorage.setItem('ragdoll-name', nameInput.value); } catch { /* private mode */ }
+  });
+}
+
+function cleanName(value) {
+  const text = String(value || '').replace(/[^\w .'-]/g, '').trim().slice(0, 12);
+  return text || 'Chicken';
+}
+
+function myName() {
+  return cleanName(nameInput && nameInput.value);
+}
+
+function setRoomStatus(text) {
+  if (roomStatus) roomStatus.textContent = text;
+}
+
+function roomPanelHidden() {
+  return !roomPanel || roomPanel.hidden;
+}
+
+function syncMainMenuButton() {
+  const button = document.querySelector('#btn-main-menu');
+  if (!button) return;
+  button.hidden = !started || !menuOpen || !roomPanelHidden();
+}
+
+function showRoomPicker() {
+  if (!roomPanel) return;
+  roomPanel.hidden = false;
+  document.querySelector('#room-host-tools').hidden = false;
+  document.querySelector('#btn-room-play').hidden = true;
+  document.querySelector('#room-code-line').hidden = true;
+  document.querySelector('#room-friends').textContent = '';
+  playBtn.hidden = true;
+  document.querySelector('#btn-friends').hidden = true;
+  syncMainMenuButton();
+  setRoomStatus('One computer runs the street. Everyone else connects to it. No server to pay for.');
+}
+
+function hideRoomPicker() {
+  if (roomPanel) roomPanel.hidden = true;
+  playBtn.hidden = false;
+  document.querySelector('#btn-friends').hidden = false;
+  syncMainMenuButton();
+}
+
+function returnToMainMenu() {
+  void leaveOnline().then(() => {
+    started = false;
+    menuOpen = true;
+    hideRoomPicker();
+    playBtn.textContent = 'PLAY';
+    splash.hidden = false;
+    document.documentElement.removeAttribute('data-resume');
+    keys.clear();
+    flailHeld = false;
+    swingHeld = false;
+    releaseJump();
+    endStick();
+    try {
+      sessionStorage.removeItem(PLAY_KEY);
+      sessionStorage.removeItem(LEVEL_KEY);
+    } catch { /* private mode */ }
+  });
+}
+
+function refreshNetBadge() {
+  const badge = document.querySelector('#net-badge');
+  if (!badge) return;
+  if (!netRole || !roomCode) {
+    badge.hidden = true;
+    delete badge.dataset.flash;
+    return;
+  }
+  const chickens = netRole === 'host'
+    ? roster.size + 1
+    : (pendingSnap && pendingSnap.players ? pendingSnap.players.length : 1);
+  badge.hidden = false;
+  badge.title = `Copy or share room code ${roomCode}. ${chickens} playing.`;
+  if (badge.dataset.flash) return;
+  badge.textContent = `CODE ${roomCode}`;
+}
+
+function flashNetBadge(label) {
+  const badge = document.querySelector('#net-badge');
+  if (!badge) return;
+  badge.dataset.flash = '1';
+  badge.textContent = label;
+  window.setTimeout(() => {
+    delete badge.dataset.flash;
+    refreshNetBadge();
+  }, 1400);
+}
+
+async function shareRoomCode() {
+  if (!roomCode) return;
+  const message = `Join my Chicken Boom Boom street. Code: ${roomCode}`;
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: 'Chicken Boom Boom', text: message });
+      flashNetBadge('SHARED');
+      return;
+    } catch (error) {
+      if (error && error.name === 'AbortError') return;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(roomCode);
+    flashNetBadge('COPIED');
+  } catch {
+    flashNetBadge(roomCode);
+  }
+}
+
+function netSend(data, target) {
+  if (session) session.send(data, target);
+}
+
+function renderFriends() {
+  const box = document.querySelector('#room-friends');
+  if (!box) return;
+  const names = [myName()];
+  for (const peer of roster.values()) names.push(peer.name);
+  box.textContent = names.join(' · ');
+}
+
+function broadcastRoster() {
+  const people = [{ id: selfPeerId, name: myName(), slot: 0, color: FEATHERS[0], host: true }];
+  for (const peer of roster.values()) {
+    people.push({ id: peer.id, name: peer.name, slot: peer.slot, color: peer.color, host: false });
+  }
+  netSend({ t: 'roster', people });
+  renderFriends();
+  refreshNetBadge();
+}
+
+function nextSlot() {
+  const used = new Set([0]);
+  for (const peer of roster.values()) used.add(peer.slot);
+  for (let i = 1; i < FEATHERS.length; i++) if (!used.has(i)) return i;
+  return 1;
+}
+
+function labelDoll(doll, text) {
+  if (!doll || !text) return;
+  const previous = dollLabels.get(doll);
+  if (previous && previous.userData.text === text) return;
+  if (previous) previous.removeFromParent();
+  const stamp = document.createElement('canvas');
+  stamp.width = 256;
+  stamp.height = 64;
+  const draw = stamp.getContext('2d');
+  draw.font = '700 36px Fredoka, sans-serif';
+  draw.fillStyle = '#1b1b1b';
+  draw.textAlign = 'center';
+  draw.textBaseline = 'middle';
+  draw.fillText(text, 128, 34);
+  const map = new THREE.CanvasTexture(stamp);
+  map.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthWrite: false }));
+  sprite.position.set(0, 1.25, 0);
+  sprite.scale.set(1.6, 0.4, 1);
+  sprite.userData.text = text;
+  doll.torso.mesh.add(sprite);
+  dollLabels.set(doll, sprite);
+}
+
+function syncActors() {
+  if (!streetLevel()) return;
+  const list = [ragdoll];
+  for (const peer of roster.values()) if (peer.doll) list.push(peer.doll);
+  streets.setActors(list);
+}
+
+function spawnMate(peer) {
+  if (!peer || peer.doll || !streetLevel()) return;
+  const doll = createRagdoll(world, scene, art, ragMat, peer.color);
+  doll.setCostume('chicken');
+  doll.setWalker(true);
+  const spot = ragdoll.walking() ? ragdoll.mover().position : ragdoll.torso.body.position;
+  doll.place(spot.x + 1.7 * peer.slot, ragdoll.torso.spawn.y, spot.z + 0.8);
+  doll.mover().material = streets.walkerMaterial();
+  for (const part of doll.parts) {
+    part.body.linearDamping = 0.14;
+    part.body.angularDamping = 0.24;
+  }
+  peer.doll = doll;
+  peer.faceYaw = Math.PI;
+  labelDoll(doll, peer.name);
+}
+
+function syncDolls(time) {
+  ragdoll.sync(time, charge, maxChaosTimer > 0);
+  for (const peer of roster.values()) {
+    if (peer.doll && peer.doll !== ragdoll) peer.doll.sync(time, 0, false);
+  }
+  for (const doll of guestDolls.values()) doll.sync(time, 0, false);
+}
+
+function wishVector(gp) {
+  let ix = 0;
+  let iy = 0;
+  if (keys.has('KeyA')) ix -= 1;
+  if (keys.has('KeyD')) ix += 1;
+  if (keys.has('KeyW')) iy -= 1;
+  if (keys.has('KeyS')) iy += 1;
+  ix = clamp(ix + stickVec.x + (gp ? gp.x : 0), -1, 1);
+  iy = clamp(iy + stickVec.y + (gp ? gp.y : 0), -1, 1);
+  const mag = Math.hypot(ix, iy);
+  if (mag < 0.12) return { x: 0, z: 0 };
+  const scale = Math.min(1, mag) / mag;
+  const sx = ix * scale;
+  const sy = iy * scale;
+  return {
+    x: Math.cos(yaw) * sx + Math.sin(yaw) * sy,
+    z: -Math.sin(yaw) * sx + Math.cos(yaw) * sy,
+  };
+}
+
+function hopDoll(peer) {
+  const doll = peer.doll;
+  if (!doll || !streetLevel() || streets.locked()) return;
+  if (!doll.walking()) {
+    doll.setWalker(true);
+    doll.mover().material = streets.walkerMaterial();
+    doll.poseWalker(peer.faceYaw || 0, peer.walkPhase || 0, 0, 0, 0);
+    return;
+  }
+  const torso = doll.mover();
+  if (doll.isSupported(world)) {
+    if (torso.velocity.y < 7.4) torso.velocity.y = 7.4;
+    doll.noteFlap();
+    peer.air = 2;
+  } else if (peer.air > 0) {
+    peer.air -= 1;
+    const hop = peer.air === 1 ? 10.2 : 13.2;
+    if (torso.velocity.y < hop) torso.velocity.y = hop;
+    doll.noteFlap();
+  } else return;
+  torso.wakeUp();
+}
+
+function rescueMate(peer) {
+  if (!peer.doll) return;
+  const spot = streets.respawn(ragdoll.mover().position);
+  peer.doll.setWalker(true);
+  peer.doll.place(spot.x + peer.slot * 0.8, peer.doll.torso.spawn.y, spot.z);
+  peer.doll.mover().material = streets.walkerMaterial();
+}
+
+function driveRemotes() {
+  if (netRole !== 'host' || !streetLevel()) return;
+  const now = performance.now();
+  for (const peer of roster.values()) {
+    const doll = peer.doll;
+    if (!doll) continue;
+    if (doll.isSupported(world)) peer.air = 2;
+    if (peer.jump && now - peer.lastJump > 280) {
+      peer.lastJump = now;
+      hopDoll(peer);
+    }
+    peer.jump = false;
+    if (!doll.walking()) {
+      if (peer.flail && now - peer.lastFlail > 70) {
+        peer.lastFlail = now;
+        peer.spin = -(peer.spin || 1);
+        doll.flail(null, peer.spin);
+      }
+      if (doll.spread() > 9 || doll.torso.body.position.y < -6) rescueMate(peer);
+      continue;
+    }
+    const body = doll.mover();
+    const mag = Math.hypot(peer.wishX, peer.wishZ);
+    if (mag > 0.12) {
+      const scale = Math.min(1, mag) / mag;
+      body.velocity.x = peer.wishX * scale * 11;
+      body.velocity.z = peer.wishZ * scale * 11;
+    }
+    body.wakeUp();
+    if (peer.flail && now - peer.lastFlail > 70) {
+      peer.lastFlail = now;
+      doll.noteFlap();
+      if (body.velocity.y < 2.4) body.velocity.y += 1.5;
+    }
+    if (body.position.y < -6) rescueMate(peer);
+  }
+}
+
+function poseRemotes(dt) {
+  if (netRole !== 'host') return;
+  for (const peer of roster.values()) {
+    const doll = peer.doll;
+    if (!doll || !doll.walking()) continue;
+    const mover = doll.mover();
+    const speed = Math.hypot(mover.velocity.x, mover.velocity.z);
+    const grounded = doll.isSupported(world);
+    const gait = !grounded ? 0.12 : speed < 0.35 ? 0 : Math.min(1, 0.55 + speed / 10);
+    peer.gait = gait;
+    peer.walkPhase = (peer.walkPhase || 0) + Math.max(speed * 0.85, gait > 0 ? 3.1 : 0) * dt;
+    if (speed > 0.45) {
+      const target = Math.atan2(mover.velocity.x, mover.velocity.z);
+      let turn = target - (peer.faceYaw || 0);
+      while (turn > Math.PI) turn -= Math.PI * 2;
+      while (turn < -Math.PI) turn += Math.PI * 2;
+      peer.faceYaw = (peer.faceYaw || 0) + turn * (1 - Math.exp(-12 * dt));
+    }
+    doll.poseWalker(peer.faceYaw || 0, peer.walkPhase || 0, gait, dt, 0);
+  }
+}
+
+function capturePlayers() {
+  const players = [];
+  const self = ragdoll.capturePose();
+  self.id = selfPeerId || 'host';
+  self.name = myName();
+  self.slot = 0;
+  self.color = FEATHERS[0];
+  if (self.w) {
+    self.phase = Math.round(walkPhase * 100) / 100;
+    self.gait = Math.round(localGait * 100) / 100;
+    self.yaw = Math.round(faceYaw * 1000) / 1000;
+  }
+  players.push(self);
+  for (const peer of roster.values()) {
+    if (!peer.doll) continue;
+    const pose = peer.doll.capturePose();
+    pose.id = peer.id;
+    pose.name = peer.name;
+    pose.slot = peer.slot;
+    pose.color = peer.color;
+    if (pose.w) {
+      pose.phase = Math.round((peer.walkPhase || 0) * 100) / 100;
+      pose.gait = Math.round((peer.gait || 0) * 100) / 100;
+      pose.yaw = Math.round((peer.faceYaw || pose.yaw || 0) * 1000) / 1000;
+    }
+    players.push(pose);
+  }
+  return players;
+}
+
+function publishNet(dt) {
+  if (netRole !== 'host' || !started || !session || netBusy) return;
+  netAcc += dt;
+  if (netAcc < 0.1) return;
+  netAcc = 0;
+  let packet;
+  try {
+    packet = {
+      t: 'snap',
+      score,
+      players: capturePlayers(),
+      city: streetLevel() ? streets.capture() : null,
+    };
+  } catch (error) {
+    console.error(error);
+    return;
+  }
+  netBusy = true;
+  Promise.resolve(session.send(packet)).then(() => {
+    netBusy = false;
+  }, (error) => {
+    netBusy = false;
+    console.error(error);
+  });
+  refreshNetBadge();
+}
+
+function applyPlayers(players, dt, hard) {
+  const seen = new Set();
+  for (const pose of players || []) {
+    if (!pose || !pose.id) continue;
+    seen.add(pose.id);
+    const mine = pose.id === selfPeerId;
+    let doll = mine ? ragdoll : guestDolls.get(pose.id);
+    if (!mine && !doll) {
+      doll = createRagdoll(world, scene, art, ragMat, pose.color || FEATHERS[1]);
+      doll.setCostume('chicken');
+      doll.setWalker(true);
+      if (streetLevel()) doll.mover().material = streets.walkerMaterial();
+      guestDolls.set(pose.id, doll);
+    }
+    if (!doll) continue;
+    if (pose.color) doll.recolor(pose.color);
+    if (!mine && pose.name) labelDoll(doll, pose.name);
+    if (pose.w) {
+      let view = poseViews.get(pose.id);
+      if (!view || hard) view = { x: pose.x, y: pose.y, z: pose.z, yaw: pose.yaw || 0, phase: pose.phase || 0 };
+      else {
+        const blend = 1 - Math.exp(-14 * dt);
+        view.x += (pose.x - view.x) * blend;
+        view.y += (pose.y - view.y) * blend;
+        view.z += (pose.z - view.z) * blend;
+        view.phase += ((pose.phase || 0) - view.phase) * blend;
+        let turn = (pose.yaw || 0) - view.yaw;
+        while (turn > Math.PI) turn -= Math.PI * 2;
+        while (turn < -Math.PI) turn += Math.PI * 2;
+        view.yaw += turn * blend;
+      }
+      poseViews.set(pose.id, view);
+      if (!doll.walking()) {
+        doll.setWalker(true);
+        if (streetLevel()) doll.mover().material = streets.walkerMaterial();
+      }
+      doll.plant(view.x, view.y, view.z);
+      doll.poseWalker(view.yaw, view.phase || 0, pose.gait || 0, dt, 0);
+    } else if (pose.parts) doll.applyParts(pose.parts);
+  }
+  for (const [id, doll] of guestDolls) {
+    if (seen.has(id)) continue;
+    doll.dispose();
+    guestDolls.delete(id);
+    poseViews.delete(id);
+  }
+}
+
+function playNetFx(data) {
+  const mine = !data.who || data.who === selfPeerId;
+  if (mine && data.honk) sfx.honk();
+  if (mine && data.bawk) sfx.bawk();
+  if (mine && data.boom) sfx.boom();
+  else if (mine && data.who && data.impact) sfx.impact(data.impact);
+  if (data.callout) callout(data.callout);
+  if (data.shake) shake(data.shake);
+  if (!data.burst || !data.pos) return;
+  const colors = data.burst === 'boom'
+    ? [0xfff1a8, 0xff7a18, 0xff3355, 0xffffff]
+    : data.burst === 'feather'
+    ? [0xffd84a, 0xfff6d0, 0xffffff]
+    : [0xff5d73, 0xffe14a, 0x4d96ff, 0x6bcb77];
+  particles.burst(data.pos.x, data.pos.y, data.pos.z, {
+    colors,
+    count: data.burst === 'boom' ? 36 : 16,
+    speed: 5,
+    life: 0.45,
+    gravity: 6,
+    up: 2.4,
+  });
+}
+
+function sendInput(dt, gp) {
+  if (netRole !== 'guest' || !session || !started) return;
+  inputAcc += dt;
+  const jump = guestJump;
+  if (!jump && inputAcc < 1 / 15) return;
+  inputAcc = 0;
+  guestJump = false;
+  const wish = menuOpen ? { x: 0, z: 0 } : wishVector(gp);
+  const flail = !menuOpen && (flailHeld || keys.has('KeyF') || keys.has('KeyJ') || keys.has('KeyK') || gp.flail);
+  netSend({
+    t: 'in',
+    x: Math.round(wish.x * 100) / 100,
+    z: Math.round(wish.z * 100) / 100,
+    f: flail ? 1 : 0,
+    j: jump ? 1 : 0,
+  });
+}
+
+function stepGuest(dt) {
+  simTime += dt;
+  if (!started) yaw += dt * 0.16;
+  const gp = pollGamepad();
+  if (!menuOpen && started) {
+    let lookX = gp.lookX;
+    let lookY = gp.lookY;
+    if (keys.has('ArrowLeft')) lookX -= 1;
+    if (keys.has('ArrowRight')) lookX += 1;
+    if (keys.has('ArrowUp')) lookY -= 1;
+    if (keys.has('ArrowDown')) lookY += 1;
+    yaw -= clamp(lookX, -1, 1) * dt * 2.4;
+    pitch = clamp(pitch + clamp(lookY, -1, 1) * dt * 1.6, 0.2, 1.25);
+    if (gp.jump && !gpJumpWas) guestJump = true;
+    gpJumpWas = !!gp.jump;
+  }
+  sendInput(dt, gp);
+  let hard = false;
+  if (pendingSnap && started && streetLevel()) {
+    hard = !!streets.present(pendingSnap.city);
+    applyPlayers(pendingSnap.players, dt, hard);
+  }
+  if (started && streetLevel()) {
+    streets.glide(dt);
+    streets.tick(dt);
+    streets.sync();
+  }
+  syncDolls(simTime);
+  const torso = ragdoll.torso.body;
+  particles.update(dt);
+  const height = torso.position.y - GROUND_Y;
+  const shade = clamp(1 - (height - 0.7) / 5.5, 0, 1);
+  blob.position.x = torso.position.x;
+  blob.position.z = torso.position.z;
+  blob.scale.setScalar(0.75 + (1 - shade) * 1.1);
+  blob.material.opacity = 0.3 * shade;
+  updateCamera(dt, torso);
+  updateHud();
+  popups.update(dt);
+}
+
+function onNetMessage(data, peerId) {
+  if (!data || typeof data !== 'object') return;
+  if (netRole === 'host') {
+    const peer = roster.get(peerId);
+    if (data.t === 'hi') {
+      const name = cleanName(data.name);
+      pendingNames.set(peerId, name);
+      if (peer) {
+        peer.name = name;
+        if (peer.doll) labelDoll(peer.doll, peer.name);
+        broadcastRoster();
+      }
+      return;
+    }
+    if (!peer) return;
+    if (data.t === 'in') {
+      peer.wishX = Number(data.x) || 0;
+      peer.wishZ = Number(data.z) || 0;
+      peer.flail = !!data.f;
+      if (data.j) peer.jump = true;
+    } else if (data.t === 'toys' && peer.doll && streetLevel()) {
+      streets.dumpToys(peer.doll.mover().position);
+    } else if (data.t === 'reset' && peer.doll && streetLevel()) {
+      rescueMate(peer);
+    } else if (data.t === 'grav') toggleGravity();
+    return;
+  }
+  if (data.t === 'roster') {
+    const lines = [];
+    for (const person of data.people || []) {
+      lines.push(person.host ? `${person.name} (host)` : person.name);
+      if (person.host) hostPeerId = person.id;
+      if (person.id === selfPeerId) {
+        myColor = person.color || myColor;
+        if (started) ragdoll.recolor(myColor);
+      }
+    }
+    const box = document.querySelector('#room-friends');
+    if (box) box.textContent = lines.join(' · ');
+    refreshNetBadge();
+  } else if (data.t === 'go') {
+    hostPeerId = peerId;
+    if (!started) launchLevel();
+    else {
+      if (streetLevel()) streets.setMirror(true);
+      ragdoll.recolor(myColor);
+      closeMenu();
+    }
+  } else if (data.t === 'snap') {
+    pendingSnap = data;
+    if (typeof data.score === 'number') {
+      score = data.score;
+      if (started) updateScoreHud(false);
+    }
+    refreshNetBadge();
+  } else if (data.t === 'fx' && started) playNetFx(data);
+}
+
+function onPeerJoin(peerId) {
+  if (netRole !== 'host' || peerId === selfPeerId) return;
+  if (roster.has(peerId)) return;
+  const slot = nextSlot();
+  roster.set(peerId, {
+    id: peerId,
+    name: pendingNames.get(peerId) || 'Friend',
+    slot,
+    color: FEATHERS[slot % FEATHERS.length],
+    doll: null,
+    wishX: 0,
+    wishZ: 0,
+    jump: false,
+    flail: false,
+    lastJump: 0,
+    lastFlail: 0,
+    air: 2,
+    walkPhase: 0,
+    faceYaw: Math.PI,
+    gait: 0,
+    spin: 1,
+  });
+  if (started && streetLevel()) {
+    spawnMate(roster.get(peerId));
+    syncActors();
+  }
+  broadcastRoster();
+  if (started) netSend({ t: 'go' }, peerId);
+  renderFriends();
+}
+
+function onPeerLeave(peerId) {
+  if (netRole === 'guest' && peerId === hostPeerId) {
+    const note = 'The host left, so this shared street stopped.';
+    void leaveOnline().then(() => {
+      showRoomPicker();
+      setRoomStatus(note);
+      openMenu();
+      playBtn.textContent = 'PLAY';
+    });
+    return;
+  }
+  const peer = roster.get(peerId);
+  if (!peer) return;
+  if (peer.doll) peer.doll.dispose();
+  roster.delete(peerId);
+  syncActors();
+  broadcastRoster();
+  renderFriends();
+}
+
+async function leaveOnline() {
+  const role = netRole;
+  netRole = null;
+  hostPeerId = '';
+  pendingSnap = null;
+  for (const peer of roster.values()) {
+    if (peer.doll) peer.doll.dispose();
+  }
+  roster.clear();
+  for (const doll of guestDolls.values()) doll.dispose();
+  guestDolls.clear();
+  poseViews.clear();
+  const current = session;
+  session = null;
+  roomCode = '';
+  if (current) await current.leave().catch(() => {});
+  myColor = FEATHERS[0];
+  ragdoll.recolor(myColor);
+  streets.setMirror(false);
+  refreshNetBadge();
+  if (role === 'guest') {
+    started = false;
+    menuOpen = true;
+    splash.hidden = false;
+  }
+}
+
+function makeCode() {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 4; i++) code += alphabet[(Math.random() * alphabet.length) | 0];
+  return code;
+}
+
+async function openRoom(code, role) {
+  await leaveOnline();
+  hideRoomPicker();
+  showRoomPicker();
+  netRole = role;
+  roomCode = code;
+  setRoomStatus('Connecting…');
+  try {
+    session = connectRoom(code, {
+      onMessage: onNetMessage,
+      onJoin: onPeerJoin,
+      onLeave: onPeerLeave,
+      onError: (error) => setRoomStatus(error.message || 'Connection problem. Try the room again.'),
+    });
+    await session.ready;
+    selfPeerId = await session.selfId();
+  } catch (error) {
+    netRole = null;
+    session = null;
+    roomCode = '';
+    setRoomStatus(error.message || 'Could not connect. Check your internet and try again.');
+    refreshNetBadge();
+    return;
+  }
+  document.querySelector('#room-code-view').textContent = code;
+  document.querySelector('#room-code-line').hidden = false;
+  document.querySelector('#room-host-tools').hidden = true;
+  if (role === 'host') {
+    document.querySelector('#btn-room-play').hidden = false;
+    setRoomStatus('Share this code. When your friends show up, start the street.');
+    broadcastRoster();
+  } else {
+    document.querySelector('#btn-room-play').hidden = true;
+    setRoomStatus('Connected. Waiting for the host to start.');
+    netSend({ t: 'hi', name: myName() });
+  }
+  refreshNetBadge();
+}
+
+function startTogether() {
+  if (netRole !== 'host' || !session) return;
+  netSend({ t: 'go' });
+  if (!started) launchLevel();
+  else closeMenu();
+  sfx.ui();
+}
+
+document.querySelector('#btn-menu').addEventListener('click', () => {
+  if (!started) return;
+  openMenu();
+  sfx.ui();
+});
+document.querySelector('#btn-main-menu').addEventListener('click', () => {
+  returnToMainMenu();
+  sfx.ui();
+});
+document.querySelector('#btn-friends').addEventListener('click', () => {
+  showRoomPicker();
+  sfx.ui();
+});
+document.querySelector('#btn-host').addEventListener('click', () => {
+  void openRoom(makeCode(), 'host');
+  sfx.ui();
+});
+document.querySelector('#join-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const code = document.querySelector('#join-code').value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+  if (code.length < 4) {
+    setRoomStatus('Enter the 4-character code from the host.');
+    return;
+  }
+  void openRoom(code, 'guest');
+  sfx.ui();
+});
+document.querySelector('#btn-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText(roomCode);
+    setRoomStatus(`Copied ${roomCode}. Send it to your friends.`);
+  } catch {
+    setRoomStatus(`Room code: ${roomCode}`);
+  }
+});
+document.querySelector('#net-badge').addEventListener('click', () => {
+  void shareRoomCode();
+  sfx.ui();
+});
+document.querySelector('#btn-room-play').addEventListener('click', startTogether);
+document.querySelector('#btn-room-leave').addEventListener('click', () => {
+  void leaveOnline().then(() => {
+    hideRoomPicker();
+    setRoomStatus('One computer runs the street. Everyone else connects to it. No server to pay for.');
+  });
+  sfx.ui();
+});
 

@@ -154,6 +154,7 @@ export function createWeapons(scene, art) {
   scene.add(root);
   const drops = [];
   let held = null;
+  let shownKey = '';
   let chop = 0;
   const hitIds = new Set();
   const mats = {
@@ -318,6 +319,25 @@ export function createWeapons(scene, art) {
   }
 
   return {
+    layout() {
+      return drops.map((drop) => [
+        KINDS.indexOf(drop.kind),
+        Math.round(drop.x * 100) / 100,
+        Math.round(drop.z * 100) / 100,
+      ]);
+    },
+    show(list) {
+      const key = list.map((drop) => drop.join(',')).join('|');
+      if (key === shownKey) return;
+      shownKey = key;
+      for (let i = drops.length - 1; i >= 0; i--) {
+        const drop = drops[i];
+        drop.group.removeFromParent();
+        discard(drop.group);
+        drops.splice(i, 1);
+      }
+      for (const [index, x, z] of list) spawn(x, z, index);
+    },
     clear() {
       for (const drop of drops) discard(drop.group);
       drops.length = 0;

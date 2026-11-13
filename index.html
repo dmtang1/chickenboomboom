@@ -29,6 +29,8 @@
         <div id="best">BEST 0</div>
       </div>
       <div id="controls">
+        <button type="button" id="btn-menu" title="Menu (Esc)">MENU</button>
+        <button type="button" id="net-badge" hidden title="Copy or share the room code"></button>
         <button type="button" id="btn-toys" title="Drop a pile of toys (T)">TOYS</button>
         <div id="settings">
           <button type="button" id="btn-settings" aria-expanded="false" aria-controls="settings-panel">SETTINGS</button>
@@ -85,6 +87,23 @@
         <h1>CHICKEN BOOM BOOM</h1>
         <p class="lede">You are a chicken. Traffic hits back, buildings come down, and bright doors open into rooms packed with toys that knock you around.</p>
         <button type="button" id="btn-play">PLAY</button>
+        <button type="button" id="btn-friends">PLAY WITH FRIENDS</button>
+        <button type="button" id="btn-main-menu" hidden>MAIN MENU</button>
+        <div id="room-panel" hidden>
+          <label class="room-name">YOUR NAME <input id="chick-name" maxlength="12" placeholder="Chicken" autocomplete="nickname" /></label>
+          <p id="room-status">One computer runs the street. Everyone else connects to it. No server to pay for.</p>
+          <p id="room-code-line" hidden>CODE <b id="room-code-view">----</b> <button type="button" id="btn-copy">COPY</button></p>
+          <div id="room-friends"></div>
+          <div id="room-host-tools">
+            <button type="button" id="btn-host">HOST A ROOM</button>
+            <form id="join-form">
+              <input id="join-code" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false" />
+              <button type="submit">JOIN</button>
+            </form>
+          </div>
+          <button type="button" id="btn-room-play" hidden>START THE STREET</button>
+          <button type="button" id="btn-room-leave">BACK</button>
+        </div>
         <p class="fine">WASD walk · arrows look · SPACE jump · hop into a car with SPACE and drive · F flail · E smash · bright doors open · the green EXIT lets you out</p>
       </div>
     </div>

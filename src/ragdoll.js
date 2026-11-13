@@ -4,7 +4,7 @@ import { GROUND_Y, GROUP_PROP, GROUP_RAG, GROUP_STATIC } from './util.js';
 
 const GAP = 0.045;
 
-export function createRagdoll(world, scene, art, ragMat) {
+export function createRagdoll(world, scene, art, ragMat, feather = 0xffd84a) {
   const skin = art.plastic(0xffc2a1, { roughness: 0.55 });
   const shirtMat = art.plastic(0xff3b5c);
   const shortsMat = art.plastic(0x3d7eff);
@@ -303,6 +303,9 @@ export function createRagdoll(world, scene, art, ragMat) {
 
   let costume = 'doll';
   let chickenReady = false;
+  let featherColor = feather;
+  let featherMat = null;
+  let api = null;
   const ghost = new THREE.MeshBasicMaterial({
     transparent: true,
     opacity: 0,
@@ -351,7 +354,7 @@ export function createRagdoll(world, scene, art, ragMat) {
   function buildChicken() {
     if (chickenReady) return;
     chickenReady = true;
-    const yellow = art.plastic(0xffd84a, { roughness: 0.42 });
+    const yellow = featherMat = art.plastic(featherColor, { roughness: 0.42 });
     const cream = art.plastic(0xfff6d2, { roughness: 0.46 });
     const orange = art.plastic(0xff7a1a, { roughness: 0.4 });
     const red = art.plastic(0xff2a2a, { roughness: 0.42 });
@@ -557,12 +560,13 @@ export function createRagdoll(world, scene, art, ragMat) {
         angularDamping: 1,
         allowSleep: false,
         collisionFilterGroup: GROUP_RAG,
-        collisionFilterMask: GROUP_PROP | GROUP_STATIC,
+        collisionFilterMask: GROUP_RAG | GROUP_PROP | GROUP_STATIC,
       });
       walker.addShape(new CANNON.Box(new CANNON.Vec3(0.42, WALKER_HALF, 0.42)));
       walker.angularFactor.set(0, 0, 0);
       walker.gameRole = 'ragdoll';
       walker.partName = 'walker';
+      walker.doll = api;
       world.addBody(walker);
       const t = torsoPart.body.position;
       snapWalker(t.x, t.y, t.z);
@@ -670,7 +674,14 @@ export function createRagdoll(world, scene, art, ragMat) {
     return now;
   }
 
-  return {
+  function round2(n) {
+    return Math.round(n * 100) / 100;
+  }
+  function round3(n) {
+    return Math.round(n * 1000) / 1000;
+  }
+
+  api = {
     parts,
     limbs,
     targets,
@@ -859,5 +870,65 @@ export function createRagdoll(world, scene, art, ragMat) {
     supportParts,
     setCostume,
     costume: () => costume,
+    recolor(hex) {
+      featherColor = hex;
+      if (featherMat) featherMat.color.setHex(hex);
+    },
+    plant(x, y, z) {
+      if (!walking || !walker) setWalking(true);
+      walker.position.set(x, y, z);
+      walker.previousPosition.copy(walker.position);
+    },
+    applyParts(packed) {
+      if (walking) setWalking(false);
+      for (let i = 0; i < parts.length; i++) {
+        const row = packed[i];
+        if (!row) continue;
+        const body = parts[i].body;
+        body.position.set(row[0], row[1], row[2]);
+        body.previousPosition.copy(body.position);
+        body.quaternion.set(row[3], row[4], row[5], row[6]);
+        body.previousQuaternion.copy(body.quaternion);
+        body.velocity.set(0, 0, 0);
+        body.angularVelocity.set(0, 0, 0);
+      }
+    },
+    capturePose() {
+      if (walking && walker) {
+        return {
+          w: 1,
+          x: round2(walker.position.x),
+          y: round2(walker.position.y),
+          z: round2(walker.position.z),
+          yaw: round3(faceYaw),
+        };
+      }
+      return {
+        w: 0,
+        parts: parts.map((part) => {
+          const body = part.body;
+          return [
+            round2(body.position.x),
+            round2(body.position.y),
+            round2(body.position.z),
+            round3(body.quaternion.x),
+            round3(body.quaternion.y),
+            round3(body.quaternion.z),
+            round3(body.quaternion.w),
+          ];
+        }),
+      };
+    },
+    dispose() {
+      if (walking) setWalking(false);
+      for (const constraint of constraints) world.removeConstraint(constraint);
+      constraints.length = 0;
+      for (const part of parts) {
+        if (part.body.world) world.removeBody(part.body);
+        part.mesh.removeFromParent();
+      }
+    },
   };
+  for (const part of parts) part.body.doll = api;
+  return api;
 }
