@@ -16,8 +16,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;700&display=swap" rel="stylesheet" />
-    <script type="module" crossorigin src="./assets/index-B8b1JLWV.js"></script>
-    <link rel="stylesheet" crossorigin href="./assets/index-pyPMKmMw.css">
+    <script type="module" crossorigin src="./assets/index-B2BvtLON.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-Cgv6kFHj.css">
   </head>
   <body>
     <canvas id="view"></canvas>
@@ -63,6 +63,7 @@
             <span><b>F</b> flail</span>
             <span><b>Y</b> drop</span>
             <span><b>T</b> toys</span>
+            <span><b>H</b> nest</span>
             <span><b>R</b> reset</span>
             <span><b>G</b> gravity</span>
             <span><b>M</b> sound</span>
@@ -78,7 +79,9 @@
       </div>
       <div id="max-banner" hidden>MAX CHAOS!</div>
       <div id="callout" hidden></div>
+      <div id="friend-markers"></div>
       <div id="stick" aria-hidden="true"><div id="knob"></div></div>
+      <button type="button" id="btn-nest" hidden title="Return to the nest (H)">NEST</button>
       <button type="button" id="btn-jump">JUMP</button>
       <button type="button" id="btn-flail">FLAIL</button>
     </div>
@@ -86,7 +89,7 @@
       <div class="card">
         <p class="eyebrow">ONE CHICKEN. THE WHOLE CITY.</p>
         <h1>CHICKEN BOOM BOOM</h1>
-        <p class="lede">You are a chicken. Traffic hits back, buildings come down, and bright doors open into rooms packed with toys that knock you around.</p>
+        <p class="lede">You are a chicken. Traffic hits back, buildings come down, and on a shared street your weapons hit the other chickens too.</p>
         <button type="button" id="btn-play">PLAY</button>
         <button type="button" id="btn-friends">PLAY WITH FRIENDS</button>
         <button type="button" id="btn-main-menu" hidden>MAIN MENU</button>
