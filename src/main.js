@@ -327,7 +327,6 @@ const ranksBtn = document.querySelector('#btn-ranks');
 const ranksPanel = document.querySelector('#ranks');
 const ranksList = document.querySelector('#ranks-list');
 const BESTS_KEY = 'ragdoll-bests-open';
-const RANKS_KEY = 'ragdoll-ranks-open';
 let bestsOpen = true;
 let ranksOpen = true;
 const chaosFill = document.querySelector('#chaos-fill');
@@ -364,16 +363,10 @@ function applyHintMin(min, persist) {
   try { sessionStorage.setItem(HINT_MIN_KEY, min ? '1' : '0'); } catch { /* private mode */ }
 }
 
-try {
-  const saved = sessionStorage.getItem(HINT_MIN_KEY);
-  applyHintMin(saved !== '0', false);
-} catch {
-  applyHintMin(true, false);
-}
+applyHintMin(true, false);
 hintToggle.addEventListener('click', () => applyHintMin(!hintIsMin(), true));
 try {
   bestsOpen = sessionStorage.getItem(BESTS_KEY) !== '0';
-  ranksOpen = sessionStorage.getItem(RANKS_KEY) !== '0';
 } catch { /* private mode */ }
 setBestsOpen(bestsOpen);
 if (bestsToggle) {
@@ -2163,7 +2156,6 @@ function syncRanks() {
 
 function setRanksOpen(open) {
   ranksOpen = !!open;
-  try { sessionStorage.setItem(RANKS_KEY, ranksOpen ? '1' : '0'); } catch { /* private mode */ }
   syncRanks();
 }
 
@@ -3893,6 +3885,7 @@ async function openRoom(code, role) {
       }
     }
     streets.setShared(true);
+    setRanksOpen(true);
   } catch (error) {
     netRole = null;
     session = null;
