@@ -18,6 +18,8 @@ const LOOP_BLUFF = 7.6;
 const WATER_DROP = 11;
 const AXIS_Y = new CANNON.Vec3(0, 1, 0);
 const FLOW_SPEED = 13;
+const ENTRY_GAP = 2.5;
+const ENTRY_COYOTE = 0.3;
 const FLOW_Z = 17;
 const FLOW_X = 8;
 const STILL_SECONDS = 5;
@@ -45,6 +47,8 @@ const ROOM_W = 11.5;
 const ROOM_D = 13.5;
 const ROOM_H = 5.2;
 const ROOM_SPAWN_Z = 2.35;
+const ROOM_OX = 520;
+const ROOM_OZ = 520;
 
 function hash(ix, iz) {
   let n = Math.imul(ix, 374761393) ^ Math.imul(iz, 668265263);
@@ -266,9 +270,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let jail = null;
   let room = null;
   let parked = false;
-  let portalLock = 0;
-  let roomGrace = 0;
-  let pendingGate = null;
+  const indoors = new Set();
+  const roomReturn = new Map();
+  const roomGraceDolls = new Map();
+  const entryLock = new Map();
+  const gateQueue = [];
+  let viewerInside = false;
   let bonkAt = 0;
 
   function addBody(body) {
@@ -2282,6 +2289,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let gas = 0;
   let wheel = 0;
   let offer = false;
+  const entryMemory = new Map();
 
   function tune(kind) {
     const bulk = kind.w * kind.h * kind.d;
@@ -2336,6 +2344,29 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
     }
     return best;
+  }
+
+  function freshEntry(doll) {
+    const mem = entryMemory.get(doll);
+    if (!mem) return null;
+    if (performance.now() > mem.until || !cars.includes(mem.car) || mem.car.driven || mem.car.pursuit) {
+      entryMemory.delete(doll);
+      return null;
+    }
+    return mem.car;
+  }
+
+  function trackEntry(doll) {
+    if (!doll || !doll.walking() || pilotOf(doll) || haulOf(doll) || (doll === ragdoll && bust && bust.phase)) {
+      entryMemory.delete(doll);
+      return null;
+    }
+    const live = closestCar(ENTRY_GAP, doll);
+    if (live) {
+      entryMemory.set(doll, { car: live, until: performance.now() + ENTRY_COYOTE * 1000 });
+      return live;
+    }
+    return freshEntry(doll);
   }
 
   function pilotOf(doll) {
@@ -2743,7 +2774,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     if (pilotOf(doll)) return false;
     if (haulOf(doll)) return false;
     if (doll === ragdoll && bust && bust.phase) return false;
-    const car = closestCar(1.25, doll);
+    if (!doll.walking()) return false;
+    const car = closestCar(ENTRY_GAP, doll) || freshEntry(doll);
     if (!car) return false;
     return claimFor(doll, car);
   }
@@ -4157,6 +4189,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   function actorPoints() {
     const points = [];
     for (const doll of actors) {
+      if (indoors.has(doll)) continue;
       const body = doll.walking() ? doll.mover() : doll.torso.body;
       if (body) points.push(body.position);
     }
@@ -4182,6 +4215,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     shiftX += dx;
     shiftZ += dz;
     for (const doll of actors) {
+      if (indoors.has(doll)) continue;
       for (const part of doll.parts) {
         part.body.position.x += dx;
         part.body.position.z += dz;
@@ -4620,10 +4654,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function containActors() {
-    if (room || mirror) return;
+    if (mirror) return;
     const water = GROUND_Y - WATER_DROP + 1.1;
     for (const doll of actors) {
-      if (pilotOf(doll)) continue;
+      if (indoors.has(doll) || pilotOf(doll)) continue;
       const body = doll.walking() ? doll.mover() : doll.torso.body;
       if (!body || body.position.y > water) continue;
       const spot = islandClamp(body.position.x, body.position.z, 2.4);
@@ -4678,6 +4712,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     gas = 0;
     wheel = 0;
     offer = false;
+    entryMemory.clear();
     destroyRoom();
     if (parked) resumeCity();
     bust = null;
@@ -4713,9 +4748,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     stillTime = 0;
     campSet = false;
     prey.still = false;
-    pendingGate = null;
-    portalLock = 0;
-    roomGrace = 0;
+    indoors.clear();
+    roomReturn.clear();
+    roomGraceDolls.clear();
+    entryLock.clear();
+    gateQueue.length = 0;
+    viewerInside = false;
     parked = false;
   }
 
@@ -5821,22 +5859,34 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       collisionFilterMask: GROUP_RAG | GROUP_PROP,
     });
     body.addShape(new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, d / 2)));
-    body.position.set(x, y, z);
+    body.position.set(ROOM_OX + x, y, ROOM_OZ + z);
     body.gameRole = 'static';
     addBody(body);
     room.bodies.push(body);
     const mesh = new THREE.Mesh(box, meshMat);
     mesh.scale.set(w, h, d);
-    mesh.position.set(x, y, z);
+    mesh.position.set(ROOM_OX + x, y, ROOM_OZ + z);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     room.root.add(mesh);
   }
 
+  function dollOfBody(body) {
+    if (!body) return null;
+    for (const doll of actors) {
+      if (doll.mover() === body) return doll;
+      for (const part of doll.parts) {
+        if (part.body === body) return doll;
+      }
+    }
+    return null;
+  }
+
   function onToyHit(body, toy, e) {
     if (!room) return;
     const other = e.body;
-    if (!other || other.gameRole !== 'ragdoll') return;
+    const doll = dollOfBody(other);
+    if (!doll || !indoors.has(doll)) return;
     const impact = Math.abs(e.contact.getImpactVelocityAlongNormal());
     if (!Number.isFinite(impact) || impact < 2.4) return;
     const now = performance.now();
@@ -5850,13 +5900,15 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const kz = (oz / len) * kick;
     const ky = 2.4 + Math.min(5.5, impact * 0.32);
     const pos = { x: other.position.x, y: other.position.y + 0.5, z: other.position.z };
-    if (ragdoll.walking()) {
-      const mover = ragdoll.mover();
+    const mine = doll === ragdoll;
+    if (doll.walking()) {
+      const mover = doll.mover();
       mover.velocity.x = kx;
       mover.velocity.z = kz;
       mover.velocity.y = ky;
       onEvent({
-        hit: true,
+        hit: mine,
+        who: mine ? undefined : doll,
         style: {
           spin: 4.5 + impact * 0.28,
           spinScale: 0.18,
@@ -5866,31 +5918,32 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           yJitter: 1.5,
           wobble: 6,
         },
-        launch: 0.34,
+        launch: mine ? 0.34 : 0,
         callout: toy.yell,
-        shake: Math.min(0.34, 0.08 + impact * 0.02),
-        score: 5,
+        shake: mine ? Math.min(0.34, 0.08 + impact * 0.02) : 0,
+        score: mine ? 5 : 0,
         impact,
         pos,
         burst: 'toys',
-        bawk: true,
+        bawk: mine,
       });
       return;
     }
-    for (const part of ragdoll.parts) {
+    for (const part of doll.parts) {
       part.body.velocity.x += kx * 0.42;
       part.body.velocity.z += kz * 0.42;
       part.body.velocity.y += Math.min(3.4, ky * 0.35);
       part.body.wakeUp();
     }
     onEvent({
+      who: mine ? undefined : doll,
       callout: toy.yell,
-      shake: Math.min(0.24, impact * 0.02),
-      score: 3,
+      shake: mine ? Math.min(0.24, impact * 0.02) : 0,
+      score: mine ? 3 : 0,
       impact,
       pos,
       burst: 'toys',
-      bawk: impact > 5,
+      bawk: mine && impact > 5,
     });
   }
 
@@ -5940,7 +5993,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       collisionFilterMask: GROUP_RAG | GROUP_PROP | GROUP_STATIC,
     });
     body.addShape(shape);
-    body.position.set(x, y, z);
+    body.position.set(ROOM_OX + x, y, ROOM_OZ + z);
     body.gameRole = 'prop';
     addBody(body);
     mesh.traverse((obj) => {
@@ -6016,23 +6069,23 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     for (const x of [-1.55, 1.55]) {
       const post = new THREE.Mesh(box, entryMat);
       post.scale.set(0.18, 2.5, 0.18);
-      post.position.set(x, GROUND_Y + 1.25, z);
+      post.position.set(ROOM_OX + x, GROUND_Y + 1.25, ROOM_OZ + z);
       post.castShadow = true;
       room.root.add(post);
     }
     const lintel = new THREE.Mesh(box, entryMat);
     lintel.scale.set(3.3, 0.18, 0.18);
-    lintel.position.set(0, GROUND_Y + 2.5, z);
+    lintel.position.set(ROOM_OX, GROUND_Y + 2.5, ROOM_OZ + z);
     lintel.castShadow = true;
     room.root.add(lintel);
     const sign = new THREE.Mesh(plane, signTexture('EXIT', '#143d16', '#d8ff9a'));
     sign.scale.set(1.7, 0.62, 1);
-    sign.position.set(0, GROUND_Y + 3.05, z + 0.1);
+    sign.position.set(ROOM_OX, GROUND_Y + 3.05, ROOM_OZ + z + 0.1);
     room.root.add(sign);
     const runner = new THREE.Mesh(plane, entryMat);
     runner.rotation.x = -Math.PI / 2;
     runner.scale.set(1.7, 6.6, 1);
-    runner.position.set(0, GROUND_Y + 0.04, -1.2);
+    runner.position.set(ROOM_OX, GROUND_Y + 0.04, ROOM_OZ - 1.2);
     runner.receiveShadow = true;
     room.root.add(runner);
     stockRoom();
@@ -6054,64 +6107,114 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     return null;
   }
 
+  function veilCity(hide) {
+    if (!running) return;
+    root.visible = !hide;
+    weapons.shown(!hide);
+  }
+
+  function viewerInRoom() {
+    return mirror ? viewerInside : indoors.has(ragdoll);
+  }
+
+  function evict(doll) {
+    if (!doll || !indoors.has(doll)) return;
+    indoors.delete(doll);
+    roomReturn.delete(doll);
+    roomGraceDolls.delete(doll);
+    entryLock.set(doll, 1);
+    if (room && indoors.size === 0) destroyRoom();
+    if (doll === ragdoll) veilCity(false);
+  }
+
+  function queueExit(doll) {
+    const back = roomReturn.get(doll) || (room && room.back) || { x: shiftX + 8, z: shiftZ + 8, yaw: Math.PI };
+    indoors.delete(doll);
+    roomReturn.delete(doll);
+    roomGraceDolls.delete(doll);
+    entryLock.set(doll, 1.1);
+    gateQueue.push({ kind: 'exit', doll, x: back.x, z: back.z, yaw: back.yaw });
+    if (room && indoors.size === 0) destroyRoom();
+    if (doll === ragdoll) veilCity(false);
+  }
+
+  function enterRoom(doll, door) {
+    if (!room) buildRoom({ x: door.x, z: door.z, yaw: door.yaw });
+    roomReturn.set(doll, { x: door.x, z: door.z, yaw: door.yaw });
+    indoors.add(doll);
+    roomGraceDolls.set(doll, 0.65);
+    const spread = (indoors.size - 1) * 0.65;
+    gateQueue.push({
+      kind: 'enter',
+      doll,
+      x: ROOM_OX + spread,
+      z: ROOM_OZ + ROOM_SPAWN_Z,
+      yaw: Math.PI,
+    });
+    if (doll === ragdoll) veilCity(true);
+  }
+
   function watchEntry(dt) {
-    portalLock = Math.max(0, portalLock - dt);
-    if (portalLock > 0 || pendingGate || bust || room || ride) return;
-    let door = null;
+    if (mirror) return;
+    for (const [doll, time] of entryLock) {
+      const next = time - dt;
+      if (next <= 0) entryLock.delete(doll);
+      else entryLock.set(doll, next);
+    }
     for (const doll of actors) {
+      if (indoors.has(doll) || entryLock.has(doll)) continue;
+      if (pilotOf(doll) || haulOf(doll)) continue;
+      if (doll === ragdoll && (bust || ride)) continue;
       const actor = doll.walking() ? doll.mover() : doll.torso.body;
       if (actor.position.y > GROUND_Y + 2.4) continue;
-      door = findDoor(actor.position.x, actor.position.z);
-      if (door) break;
+      const door = findDoor(actor.position.x, actor.position.z);
+      if (door) enterRoom(doll, door);
     }
-    if (!door) return;
-    suspendCity();
-    buildRoom({ x: door.x, z: door.z, yaw: door.yaw });
-    roomGrace = 0.6;
-    pendingGate = { kind: 'enter', x: 0, z: ROOM_SPAWN_Z, yaw: Math.PI };
   }
 
   function partLeftRoom(p) {
+    const x = p.x - ROOM_OX;
+    const z = p.z - ROOM_OZ;
     if (p.y > GROUND_Y + ROOM_H + 0.4) return true;
-    if (Math.abs(p.x) > ROOM_W / 2 + 0.5 || Math.abs(p.z) > ROOM_D / 2 + 0.5) return true;
+    if (Math.abs(x) > ROOM_W / 2 + 0.5 || Math.abs(z) > ROOM_D / 2 + 0.5) return true;
     const mouth = -ROOM_D / 2 + 1.05;
     const lip = -ROOM_D / 2 - 0.7;
-    return Math.abs(p.x) < 1.55 && p.z < mouth && p.z > lip && p.y < GROUND_Y + ROOM_H;
+    return Math.abs(x) < 1.55 && z < mouth && z > lip && p.y < GROUND_Y + ROOM_H;
   }
 
-  function leavingRoom() {
-    for (const doll of actors) {
-      if (doll.walking()) {
-        if (partLeftRoom(doll.mover().position)) return true;
-      } else {
-        for (const part of doll.parts) {
-          if (partLeftRoom(part.body.position)) return true;
-        }
-      }
-    }
-    return false;
+  function dollLeftRoom(doll) {
+    if (doll.walking()) return partLeftRoom(doll.mover().position);
+    return doll.parts.some((part) => partLeftRoom(part.body.position));
   }
 
   function stepRoom(dt) {
-    roomGrace = Math.max(0, roomGrace - dt);
+    if (!room) return;
+    for (const doll of [...indoors]) {
+      const grace = (roomGraceDolls.get(doll) || 0) - dt;
+      if (grace > 0) {
+        roomGraceDolls.set(doll, grace);
+        continue;
+      }
+      roomGraceDolls.delete(doll);
+      if (dollLeftRoom(doll)) queueExit(doll);
+    }
+    if (!room) return;
     for (const toy of room.toys) {
       const p = toy.body.position;
+      const lx = p.x - ROOM_OX;
+      const lz = p.z - ROOM_OZ;
       capVelocity(toy.body, 22);
-      if (p.y < -3 || Math.abs(p.x) > ROOM_W || Math.abs(p.z) > ROOM_D + 1.2) {
-        toy.body.position.set(rand(-1.2, 1.2) + (Math.random() < 0.5 ? -2.4 : 2.4), GROUND_Y + 2.2, rand(2.4, 4.4));
+      if (p.y < -3 || Math.abs(lx) > ROOM_W || Math.abs(lz) > ROOM_D + 1.2) {
+        toy.body.position.set(
+          ROOM_OX + rand(-1.2, 1.2) + (Math.random() < 0.5 ? -2.4 : 2.4),
+          GROUND_Y + 2.2,
+          ROOM_OZ + rand(2.4, 4.4),
+        );
         toy.body.velocity.set(rand(-2, 2), 3, rand(-2, 2));
         toy.body.angularVelocity.set(rand(-4, 4), rand(-4, 4), rand(-4, 4));
         toy.body.wakeUp();
       }
     }
-    if (roomGrace <= 0 && leavingRoom()) {
-      const back = room.back;
-      destroyRoom();
-      resumeCity();
-      portalLock = 1;
-      pendingGate = { kind: 'exit', x: back.x, z: back.z, yaw: back.yaw };
-    }
-    return null;
   }
 
   function round2(n) {
@@ -6332,6 +6435,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
   }
   function applyRoom(inside, back, toys, hard, stamp) {
+    viewerInside = !!inside;
     if (inside && !room) {
       suspendCity();
       buildRoom(back || { x: 0, z: 0, yaw: 0 });
@@ -6419,7 +6523,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     nearCar: (doll) => {
       if (!doll || !doll.walking() || pilotOf(doll) || haulOf(doll)) return false;
       if (doll === ragdoll && bust && bust.phase) return false;
-      return !!closestCar(1.25, doll);
+      return !!(closestCar(ENTRY_GAP, doll) || freshEntry(doll));
     },
     seatOf(doll) {
       const car = pilotOf(doll);
@@ -6514,16 +6618,16 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       };
     },
     roomView() {
-      if (!room) return null;
+      if (!room || !viewerInRoom()) return null;
       const wall = 0.42;
       const margin = 0.45;
       const innerX = ROOM_W / 2 - wall / 2 - margin;
       const innerZ = ROOM_D / 2 - wall / 2 - margin;
       return {
-        minX: -innerX,
-        maxX: innerX,
-        minZ: -innerZ,
-        maxZ: innerZ,
+        minX: ROOM_OX - innerX,
+        maxX: ROOM_OX + innerX,
+        minZ: ROOM_OZ - innerZ,
+        maxZ: ROOM_OZ + innerZ,
         minY: GROUND_Y + 1.2,
         maxY: GROUND_Y + ROOM_H - 0.75,
         dist: 4.4,
@@ -6541,12 +6645,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     stepOut() {
       if (bust && bust.phase === 'ride') return false;
       if (ride) hopOut();
-      if (room) {
-        destroyRoom();
-        resumeCity();
-        portalLock = 0.35;
-        pendingGate = null;
-      }
+      evict(ragdoll);
       if (bust && bust.phase === 'cell') {
         leaveCell();
         grace = 1.2;
@@ -6557,24 +6656,31 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     begin,
     clear,
     respawn,
-    indoor: () => !!room,
-    indoorSpawn: () => ({ x: 0, z: ROOM_SPAWN_Z, yaw: Math.PI }),
+    indoor: () => viewerInRoom(),
+    inRoom: (doll) => (mirror ? doll === ragdoll && viewerInside : indoors.has(doll || ragdoll)),
+    evict,
+    indoorSpawn: () => ({ x: ROOM_OX, z: ROOM_OZ + ROOM_SPAWN_Z, yaw: Math.PI }),
     consumeGate() {
-      const gate = pendingGate;
-      pendingGate = null;
-      return gate;
+      while (gateQueue.length) {
+        const gate = gateQueue.shift();
+        if (gate.doll && !actors.includes(gate.doll)) continue;
+        return gate;
+      }
+      return null;
     },
     dumpToys(pos) {
       if (!running) return;
-      if (room) {
+      const lx = pos.x - ROOM_OX;
+      const lz = pos.z - ROOM_OZ;
+      if (room && Math.abs(lx) < ROOM_W / 2 && Math.abs(lz) < ROOM_D / 2) {
         for (let i = 0; i < 8; i++) {
           const angle = Math.random() * Math.PI * 2;
           const radius = 0.4 + Math.random() * 2.2;
           spawnRoomToy(
             'block',
-            pos.x + Math.cos(angle) * radius,
+            lx + Math.cos(angle) * radius,
             GROUND_Y + 2.2 + Math.random() * 2,
-            pos.z + Math.sin(angle) * radius,
+            lz + Math.sin(angle) * radius,
             'BONK!',
           );
         }
@@ -6599,7 +6705,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       });
     },
     prePhysics(dt) {
-      if (!running || room) return;
+      if (!running) return;
       for (const car of cars) {
         if (car.driven) {
           roll(car, dt, car.gas || 0, car.wheel || 0, false);
@@ -6642,11 +6748,11 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     },
     post(dt, torso) {
       if (!running || !torso) return null;
-      if (room) return stepRoom(dt);
       for (const car of cars) {
         if (car.pilot && !car.pilot.walking()) releaseFor(car.pilot);
       }
       for (const doll of actors) {
+        if (indoors.has(doll)) continue;
         if (!doll.walking() || pilotOf(doll) || haulOf(doll)) continue;
         if (doll === ragdoll && bust && bust.phase) continue;
         const landed = roofCar(doll);
@@ -6654,8 +6760,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       const pickedFor = [];
       for (const doll of actors) {
-        if (!doll.walking()) continue;
-        if (pilotOf(doll)) continue;
+        if (indoors.has(doll) || !doll.walking() || pilotOf(doll)) continue;
         const body = doll.mover();
         const picked = weapons.tryPickup(body.position.x, body.position.z, armKey(doll));
         if (picked) pickedFor.push({ doll, picked, body });
@@ -6671,17 +6776,24 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         });
       }
       slash();
-      refillWeapons(torso.position.x, torso.position.z);
+      if (indoors.has(ragdoll)) refillWeapons(prey.x, prey.z);
+      else refillWeapons(torso.position.x, torso.position.z);
       const actor = ragdoll.walking() ? ragdoll.mover() : torso;
       const airborne = !ragdoll.walking() && (Math.abs(torso.velocity.y) > 2.4 || torso.position.y > GROUND_Y + 2.4);
-      prey.x = actor.position.x;
-      prey.z = actor.position.z;
       const hunting = rogueAlive();
-      if (airborne) {
+      if (indoors.has(ragdoll)) {
+        stillTime = 0;
+        campSet = false;
+        prey.still = false;
+      } else if (airborne) {
+        prey.x = actor.position.x;
+        prey.z = actor.position.z;
         stillTime = 0;
         campSet = false;
         prey.still = false;
       } else {
+        prey.x = actor.position.x;
+        prey.z = actor.position.z;
         if (!campSet) {
           campX = prey.x;
           campZ = prey.z;
@@ -6736,22 +6848,46 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       untangle();
       watchEntry(dt);
-      const nextOffer = !ride && ragdoll.walking() && !(bust && bust.phase) && !!closestCar(1.25);
+      stepRoom(dt);
+      let localEntry = null;
+      for (const doll of entryMemory.keys()) {
+        if (!actors.includes(doll)) entryMemory.delete(doll);
+      }
+      for (const doll of actors) {
+        if (indoors.has(doll)) {
+          entryMemory.delete(doll);
+          continue;
+        }
+        const car = trackEntry(doll);
+        if (doll === ragdoll) localEntry = car;
+      }
+      const nextOffer = !ride && !!localEntry;
       if (nextOffer !== offer) {
         offer = nextOffer;
         onEvent({ hint: true });
       }
-      sky.position.set(torso.position.x, GROUND_Y, torso.position.z);
-      farGround.position.x = torso.position.x;
-      farGround.position.z = torso.position.z;
-      if (room) return null;
+      let streetX = torso.position.x;
+      let streetZ = torso.position.z;
+      if (indoors.has(ragdoll)) {
+        let spot = null;
+        for (const doll of actors) {
+          if (indoors.has(doll)) continue;
+          spot = doll.walking() ? doll.mover().position : doll.torso.body.position;
+          break;
+        }
+        streetX = spot ? spot.x : prey.x;
+        streetZ = spot ? spot.z : prey.z;
+      }
+      sky.position.set(streetX, GROUND_Y, streetZ);
+      farGround.position.x = streetX;
+      farGround.position.z = streetZ;
       const moved = recenter();
       containActors();
       for (const car of cars) {
         if (car.rogue) {
           if (car.driven) continue;
-          const dx = car.body.position.x - torso.position.x;
-          const dz = car.body.position.z - torso.position.z;
+          const dx = car.body.position.x - streetX;
+          const dz = car.body.position.z - streetZ;
           if (dx * dx + dz * dz < 64 && performance.now() > car.honkAt) {
             car.honkAt = performance.now() + 700;
             onEvent({ honk: true });
@@ -6759,8 +6895,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           continue;
         }
         if (car.loop || car.turning) {
-          const dx = car.body.position.x - torso.position.x;
-          const dz = car.body.position.z - torso.position.z;
+          const dx = car.body.position.x - streetX;
+          const dz = car.body.position.z - streetZ;
           if (dx * dx + dz * dz < 42 && Math.random() < dt * 0.12 && performance.now() > car.honkAt) {
             car.honkAt = performance.now() + 1400;
             onEvent({ honk: true });
@@ -6770,8 +6906,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         const remain = (stemGate(car).travel - car.travel) * car.dir;
         if (remain < -0.04) car.travel = stemGate(car).travel;
         syncCar(car);
-        const dx = car.body.position.x - torso.position.x;
-        const dz = car.body.position.z - torso.position.z;
+        const dx = car.body.position.x - streetX;
+        const dz = car.body.position.z - streetZ;
         if (dx * dx + dz * dz < 42 && Math.random() < dt * 0.18 && performance.now() > car.honkAt) {
           car.honkAt = performance.now() + 1100;
           onEvent({ honk: true });
@@ -6780,8 +6916,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       for (let i = junk.length - 1; i >= 0; i--) {
         const item = junk[i];
         const p = item.body.position;
-        const dx = p.x - torso.position.x;
-        const dz = p.z - torso.position.z;
+        const dx = p.x - streetX;
+        const dz = p.z - streetZ;
         capVelocity(item.body, item.yeet ? 40 : item.roadkill ? 22 : 16);
         const limit = item.roadkill ? 78 : 46;
         if (p.y < -4 || dx * dx + dz * dz > limit * limit) {
@@ -6790,7 +6926,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           junk.splice(i, 1);
         }
       }
-      return moved;
+      return indoors.has(ragdoll) ? null : moved;
     },
     sync() {
       if (!running) return;
@@ -6834,6 +6970,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     },
     setActors(list) {
       actors = list && list.length ? list : [ragdoll];
+      for (const doll of [...indoors]) {
+        if (!actors.includes(doll)) evict(doll);
+      }
     },
     wearPlayers(players, dollFor) {
       if (!mirror) {
@@ -6947,7 +7086,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         } : null,
       };
     },
-    present(city) {
+    present(city, viewerInRoom) {
       if (!city || !mirror) return false;
       const stamp = noteCarClock(city.time);
       const hard = applyLayout(city.sx || 0, city.sz || 0, city.tiles);
@@ -6955,7 +7094,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       applyCars(city.cars, stamp);
       applyJunk(city.junk, hard, stamp);
       weapons.show(city.drops || []);
-      applyRoom(!!city.inside, city.back, city.toys, hard, stamp);
+      applyRoom(!!viewerInRoom, city.back, city.toys, hard, stamp);
       applyCell(city.cell);
       if (typeof city.hits === 'number') hits = city.hits;
       return hard;

@@ -913,8 +913,11 @@ function step(dt) {
       look.x += moved.dx;
       look.z += moved.dz;
     }
-    const gate = streets.consumeGate();
-    if (gate) arrive(gate);
+    let gate = streets.consumeGate();
+    while (gate) {
+      arrive(gate);
+      gate = streets.consumeGate();
+    }
   }
 
   if (fastFall) {
@@ -1740,45 +1743,40 @@ function closeMenu() {
 }
 
 function arrive(gate) {
-  const dolls = [ragdoll];
-  for (const peer of roster.values()) if (peer.doll) dolls.push(peer.doll);
-  dolls.forEach((doll, index) => {
-    const side = (index - (dolls.length - 1) / 2) * 0.9;
-    const x = gate.x + Math.cos(gate.yaw) * side;
-    const z = gate.z - Math.sin(gate.yaw) * side;
-    doll.place(x, doll.torso.spawn.y, z);
-    doll.setWalker(true);
-    if (streetLevel()) doll.mover().material = streets.walkerMaterial();
-    if (doll === ragdoll) {
-      standChicken();
-      faceYaw = gate.yaw;
-      ragdoll.poseWalker(faceYaw, walkPhase, 0, 0);
-    } else {
-      const peer = [...roster.values()].find((entry) => entry.doll === doll);
-      if (peer) peer.faceYaw = gate.yaw;
-      doll.poseWalker(gate.yaw, 0, 0, 0, 0);
-    }
-  });
-  const here = ragdoll.torso.body.position;
-  look.set(here.x + panX, here.y + 0.9 + panY, here.z + panZ);
-  streetBounce = 0;
-  launchLock = 0.2;
-  trapped = false;
-  trapCharge = 0;
-  callout(gate.kind === 'enter' ? 'INSIDE!' : 'OUT!');
-  streetHint();
-  sfx.bawk();
-  const p = ragdoll.mover().position;
-  particles.burst(p.x, p.y + 0.4, p.z, {
-    colors: gate.kind === 'enter'
-      ? [0xff5d73, 0xffe14a, 0x4d96ff, 0x6bcb77]
-      : [0x6bcb77, 0xffe14a, 0xffffff],
-    count: 22,
-    speed: 4.5,
-    life: 0.45,
-    gravity: 6,
-    up: 2.2,
-  });
+  const doll = gate.doll || ragdoll;
+  const mine = doll === ragdoll;
+  doll.place(gate.x, doll.torso.spawn.y, gate.z);
+  doll.setWalker(true);
+  if (streetLevel()) doll.mover().material = streets.walkerMaterial();
+  if (mine) {
+    standChicken();
+    faceYaw = gate.yaw;
+    ragdoll.poseWalker(faceYaw, walkPhase, 0, 0);
+    const here = ragdoll.torso.body.position;
+    look.set(here.x + panX, here.y + 0.9 + panY, here.z + panZ);
+    streetBounce = 0;
+    launchLock = 0.2;
+    trapped = false;
+    trapCharge = 0;
+    callout(gate.kind === 'enter' ? 'INSIDE!' : 'OUT!');
+    streetHint();
+    sfx.bawk();
+    const p = ragdoll.mover().position;
+    particles.burst(p.x, p.y + 0.4, p.z, {
+      colors: gate.kind === 'enter'
+        ? [0xff5d73, 0xffe14a, 0x4d96ff, 0x6bcb77]
+        : [0x6bcb77, 0xffe14a, 0xffffff],
+      count: 22,
+      speed: 4.5,
+      life: 0.45,
+      gravity: 6,
+      up: 2.2,
+    });
+    return;
+  }
+  const peer = [...roster.values()].find((entry) => entry.doll === doll);
+  if (peer) peer.faceYaw = gate.yaw;
+  doll.poseWalker(gate.yaw, 0, 0, 0, 0);
 }
 
 function streetHint() {
@@ -2550,8 +2548,9 @@ function spawnMate(peer) {
   doll.setCostume('chicken');
   doll.setWalker(true);
   const here = ragdoll.walking() ? ragdoll.mover().position : ragdoll.torso.body.position;
-  const spot = streets.indoor() ? here : streets.respawn(here);
-  const aside = streets.indoor() ? peer.slot * 0.8 : peer.slot * 1.1;
+  const anchor = streets.inRoom(ragdoll) ? streets.corner() : here;
+  const spot = streets.respawn(anchor);
+  const aside = peer.slot * 1.1;
   doll.place(spot.x, ragdoll.torso.spawn.y, spot.z + aside);
   doll.mover().material = streets.walkerMaterial();
   for (const part of doll.parts) {
@@ -2647,7 +2646,10 @@ function tryNest() {
 
 function dropAtNest(doll, slot) {
   if (!doll) return;
-  if (streetLevel()) streets.hopOutDoll(doll);
+  if (streetLevel()) {
+    streets.evict(doll);
+    streets.hopOutDoll(doll);
+  }
   const spot = streets.corner();
   doll.setWalker(true);
   doll.place(spot.x + slot * 1.15, doll.torso.spawn.y, spot.z);
@@ -2722,6 +2724,11 @@ function updateFriendMarkers() {
         ny = markerVec.y;
       }
       const meters = Math.max(1, Math.round(Math.hypot(wx - mine.x, wz - mine.z)));
+      if (meters > 150) {
+        const far = markerPool.get(mate.id);
+        if (far) far.hidden = true;
+        continue;
+      }
       const onScreen = !behind && Math.abs(nx) < viewLimit && Math.abs(ny) < viewLimit;
       let el = markerPool.get(mate.id);
       if (!el || !el.querySelector('svg.mate-arrow')) {
@@ -2774,8 +2781,12 @@ function updateFriendMarkers() {
 
 function rescueMate(peer) {
   if (!peer.doll) return;
-  if (streetLevel()) streets.hopOutDoll(peer.doll);
-  const spot = streets.respawn(ragdoll.mover().position);
+  if (streetLevel()) {
+    streets.evict(peer.doll);
+    streets.hopOutDoll(peer.doll);
+  }
+  const anchor = streetLevel() && streets.inRoom(ragdoll) ? streets.corner() : ragdoll.mover().position;
+  const spot = streets.respawn(anchor);
   peer.doll.setWalker(true);
   peer.doll.place(spot.x + peer.slot * 0.8, peer.doll.torso.spawn.y, spot.z);
   peer.doll.mover().material = streets.walkerMaterial();
@@ -2867,6 +2878,11 @@ function poseRemotes(dt) {
   }
 }
 
+function stampRoom(pose, doll) {
+  if (!streetLevel() || !pose || !doll) return;
+  if (streets.inRoom(doll)) pose.room = 1;
+}
+
 function stampHold(pose, doll) {
   if (!streetLevel() || !pose || !doll) return;
   const phase = streets.custody(doll);
@@ -2906,6 +2922,7 @@ function capturePlayers() {
   stampArm(self, ragdoll);
   stampHold(self, ragdoll);
   stampSeat(self, ragdoll);
+  stampRoom(self, ragdoll);
   players.push(self);
   for (const peer of roster.values()) {
     if (!peer.doll) continue;
@@ -2922,6 +2939,7 @@ function capturePlayers() {
     stampArm(pose, peer.doll);
     stampHold(pose, peer.doll);
     stampSeat(pose, peer.doll);
+    stampRoom(pose, peer.doll);
     players.push(pose);
   }
   return players;
@@ -3255,9 +3273,14 @@ function stepGuest(dt) {
   sendInput(dt, gp);
   let hard = false;
   let stamp = null;
+  let viewerInRoom = false;
+  if (pendingSnap && pendingSnap.players) {
+    const mine = pendingSnap.players.find((person) => person.id === selfPeerId);
+    viewerInRoom = !!(mine && mine.room);
+  }
   if (pendingSnap && started && streetLevel()) {
     if (pendingSnap !== shownSnap) {
-      hard = !!streets.present(pendingSnap.city);
+      hard = !!streets.present(pendingSnap.city, viewerInRoom);
       shownSnap = pendingSnap;
       const hostTime = streets.hostStamp();
       if (hostTime >= 0) stamp = hostTime;
