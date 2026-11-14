@@ -21,15 +21,49 @@
   <body>
     <canvas id="view"></canvas>
     <div id="hud">
-      <div id="logo">CHICKEN <span>BOOM BOOM</span></div>
-      <div id="scoreboard">
-        <div id="score-row"><span class="coin"></span><span id="score">0</span></div>
-        <div id="combo">COMBO</div>
-        <div id="drop" hidden>0 m</div>
-        <div id="best">BEST 0</div>
+      <div id="corner">
+        <div id="logo">CHICKEN <span>BOOM BOOM</span></div>
+        <div id="hint" class="is-min">
+          <button type="button" id="hint-toggle" aria-expanded="false" aria-controls="hint-panel">
+            CONTROLS <span id="hint-mark" aria-hidden="true"></span>
+          </button>
+          <div id="hint-panel">
+            <div class="keygrid">
+              <span><b>WASD</b> walk</span>
+              <span><b>Arrows</b> look</span>
+              <span><b>Space</b> jump / car</span>
+              <span><b>E</b> smash</span>
+              <span><b>F</b> flail</span>
+              <span><b>Y</b> drop</span>
+              <span><b>T</b> toys</span>
+              <span><b>H</b> nest</span>
+              <span><b>R</b> reset</span>
+              <span><b>G</b> gravity</span>
+              <span><b>M</b> sound</span>
+              <span><b>Wheel</b> zoom</span>
+              <span><b>Esc</b> menu</span>
+              <span><b>L</b> ranks</span>
+            </div>
+            <p id="hint-status" hidden></p>
+          </div>
+        </div>
+        <div id="scoreboard">
+          <div id="score-row"><span class="coin"></span><span id="score">0</span></div>
+          <div id="combo">COMBO</div>
+          <div id="drop" hidden>0 m</div>
+          <div id="best">BEST 0</div>
+          <div id="bests">
+            <button type="button" id="bests-toggle" aria-expanded="true">BESTS</button>
+            <ul id="bests-list"></ul>
+          </div>
+        </div>
+        <div id="ranks" hidden>
+          <ol id="ranks-list"></ol>
+        </div>
       </div>
       <div id="controls">
         <button type="button" id="btn-menu" title="Menu (Esc)">MENU</button>
+        <button type="button" id="btn-ranks" hidden title="Show or hide the room ranks (L)">RANKS</button>
         <button type="button" id="net-badge" hidden title="Copy or share the room code"></button>
         <button type="button" id="btn-toys" title="Drop a pile of toys (T)">TOYS</button>
         <div id="settings">
@@ -46,32 +80,8 @@
         <div id="chaos-meter"><div id="chaos-fill"></div></div>
         <div id="chaos-max">MAX!</div>
       </div>
-      <div id="badges"></div>
       <div id="toasts"></div>
       <div id="popups"></div>
-      <div id="hint" class="is-min">
-        <button type="button" id="hint-toggle" aria-expanded="false" aria-controls="hint-panel">
-          CONTROLS <span id="hint-mark" aria-hidden="true"></span>
-        </button>
-        <div id="hint-panel">
-          <div class="keygrid">
-            <span><b>WASD</b> walk</span>
-            <span><b>Arrows</b> look</span>
-            <span><b>Space</b> jump / car</span>
-            <span><b>E</b> smash</span>
-            <span><b>F</b> flail</span>
-            <span><b>Y</b> drop</span>
-            <span><b>T</b> toys</span>
-            <span><b>H</b> nest</span>
-            <span><b>R</b> reset</span>
-            <span><b>G</b> gravity</span>
-            <span><b>M</b> sound</span>
-            <span><b>Wheel</b> zoom</span>
-            <span><b>Esc</b> menu</span>
-          </div>
-          <p id="hint-status" hidden></p>
-        </div>
-      </div>
       <div id="trap-banner" hidden>
         <div>MASH TO BREAK FREE!</div>
         <div id="trap-meter"><div id="trap-fill"></div></div>
@@ -89,7 +99,7 @@
       <div class="card">
         <p class="eyebrow">ONE CHICKEN. THE WHOLE CITY.</p>
         <h1>CHICKEN BOOM BOOM</h1>
-        <p class="lede">You are a chicken. Traffic hits back, buildings come down, and on a shared street your weapons hit the other chickens too.</p>
+        <p class="lede">You are a chicken. Main Street, the market, the harbor, and a night carnival each keep their own toys, traffic, and one silly badge.</p>
         <button type="button" id="btn-play">PLAY</button>
         <button type="button" id="btn-friends">PLAY WITH FRIENDS</button>
         <button type="button" id="btn-main-menu" hidden>MAIN MENU</button>

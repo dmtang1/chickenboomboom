@@ -234,6 +234,25 @@ export function createProps({ world, scene, art, toyMat, rubberMat, targets, onI
       });
       return pushItem('pinata', body, mesh, extra);
     }
+    if (type === 'float') {
+      const mesh = art.floatMesh();
+      const body = new CANNON.Body({
+        mass: 6.4,
+        position: new CANNON.Vec3(x, y, z),
+        material: toyMat,
+        linearDamping: 0.1,
+        angularDamping: 0.16,
+        allowSleep: true,
+        collisionFilterGroup: GROUP_PROP,
+        collisionFilterMask: GROUP_RAG | GROUP_PROP | GROUP_STATIC,
+      });
+      body.addShape(new CANNON.Box(new CANNON.Vec3(1.7, 0.16, 0.85)), new CANNON.Vec3(0, 0.28, 0));
+      body.addShape(new CANNON.Box(new CANNON.Vec3(0.36, 0.35, 0.58)), new CANNON.Vec3(-1.15, 0.82, 0));
+      body.addShape(new CANNON.Sphere(0.48), new CANNON.Vec3(0.15, 1.2, 0));
+      body.gameRole = 'prop';
+      world.addBody(body);
+      return pushItem('float', body, mesh, extra);
+    }
     return null;
   }
 
@@ -322,6 +341,52 @@ export function createProps({ world, scene, art, toyMat, rubberMat, targets, onI
         }
       }
     }
+  }
+
+  const WAVE_THEMES = ['ducks', 'pins', 'float'];
+  const WAVE_LABEL = { ducks: 'DUCKS!', pins: 'PINS!', float: 'PARADE!' };
+  let waveCursor = 0;
+
+  function nudgeWave(item, cx, cz) {
+    const p = item.body.position;
+    item.body.velocity.set((cx - p.x) * 0.35 + rand(-0.4, 0.4), rand(-0.3, 1.1), (cz - p.z) * 0.35 + rand(-0.4, 0.4));
+    item.body.angularVelocity.set(rand(-2.5, 2.5), rand(-2.5, 2.5), rand(-2.5, 2.5));
+    item.body.wakeUp();
+  }
+
+  function spawnWave(x = 0, z = 0) {
+    const theme = WAVE_THEMES[waveCursor % WAVE_THEMES.length];
+    waveCursor += 1;
+    const sky = 15 + Math.random() * 4;
+    if (theme === 'ducks') {
+      for (let i = 0; i < 7; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = Math.random() * 2.3;
+        const scale = i === 0 ? 1.75 : 0.85 + Math.random() * 0.45;
+        const item = spawn('duck', x + Math.cos(angle) * radius, sky + i * 0.55, z + Math.sin(angle) * radius, { scale });
+        nudgeWave(item, x, z);
+      }
+    } else if (theme === 'pins') {
+      for (let row = 0; row < 4; row++) {
+        for (let c = 0; c <= row; c++) {
+          const item = spawn(
+            'pin',
+            x + (c - row / 2) * 0.48,
+            sky + 0.4,
+            z - 0.7 + row * 0.48,
+          );
+          nudgeWave(item, x, z);
+        }
+      }
+      const bowler = spawn('duck', x, sky + 3.4, z - 2.2, { scale: 1.15 });
+      bowler.body.velocity.set(0, -0.2, 3.4);
+      bowler.body.wakeUp();
+    } else {
+      const item = spawn('float', x, sky + 2, z);
+      item.body.angularVelocity.set(rand(-1.2, 1.2), rand(-0.8, 0.8), rand(-1.2, 1.2));
+      item.body.wakeUp();
+    }
+    return WAVE_LABEL[theme];
   }
 
   function spawnPile(x = 0, z = 0) {
@@ -441,6 +506,7 @@ export function createProps({ world, scene, art, toyMat, rubberMat, targets, onI
     items,
     spawn,
     spawnPile,
+    spawnWave,
     populate,
     update,
     setActive,

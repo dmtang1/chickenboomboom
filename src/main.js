@@ -15,12 +15,16 @@ const SAVE_KEY = 'ragdoll-playground';
 const PLAY_KEY = 'ragdoll-playground-playing';
 const LEVEL_KEY = 'ragdoll-playground-level';
 const BADGES = [
-  { id: 'wrecking', icon: '🎳', name: 'Wrecking Ball', desc: 'Knock over 50 blocks in 10 seconds' },
-  { id: 'masher', icon: '🔥', name: 'Button Masher', desc: 'Hit MAX CHAOS 3 times' },
-  { id: 'air', icon: '🕊️', name: 'Airborne Menace', desc: 'Stay off the ground for 5 seconds' },
-  { id: 'duck', icon: '🦆', name: 'Duck Hunter', desc: 'Launch a giant rubber duck into orbit' },
-  { id: 'heli', icon: '🚁', name: 'Human Helicopter', desc: 'Spin at max speed while flailing' },
-  { id: 'drop', icon: '🌀', name: 'Down the Spiral', desc: 'Fall 200 meters on Sky Stairs' },
+  { id: 'wrecking', icon: '🎳', name: 'Wrecking Ball', desc: 'Knock over 50 blocks in 10 seconds', where: 'toy' },
+  { id: 'masher', icon: '🔥', name: 'Button Masher', desc: 'Hit MAX CHAOS 3 times', where: 'toy' },
+  { id: 'air', icon: '🕊️', name: 'Airborne Menace', desc: 'Stay off the ground for 5 seconds', where: 'toy' },
+  { id: 'duck', icon: '🦆', name: 'Duck Hunter', desc: 'Launch a giant rubber duck into orbit', where: 'toy' },
+  { id: 'heli', icon: '🚁', name: 'Human Helicopter', desc: 'Spin at max speed while flailing', where: 'toy' },
+  { id: 'drop', icon: '🌀', name: 'Down the Spiral', desc: 'Fall 200 meters on Sky Stairs', where: 'stairs' },
+  { id: 'meter', icon: '🅿️', name: 'Meter Maid', desc: 'Knock over 4 parking meters on Main Street', where: 'street' },
+  { id: 'cart', icon: '🛒', name: 'Cart Crash', desc: 'Flatten 6 market carts and crates', where: 'street' },
+  { id: 'overboard', icon: '🌊', name: 'Overboard', desc: 'Splash into the harbor', where: 'street' },
+  { id: 'balloon', icon: '🎈', name: 'Balloon Bandit', desc: 'Pop 5 carnival balloons', where: 'street' },
 ];
 
 const canvas = document.querySelector('#view');
@@ -90,6 +94,11 @@ const unlocked = new Set(save.badges.filter((id) => BADGES.some((b) => b.id === 
 let score = 0;
 let best = save.best || 0;
 let bestDrop = save.bestDrop || 0;
+const records = save.records;
+const points = new Map();
+const tricks = new Map();
+let bestAir = 0;
+const recordShout = {};
 let levelId = 'chicken';
 const FEATHERS = [0xffd84a, 0xff5d73, 0x7ec8ff, 0x6bcb77, 0xc77dff, 0xff922b, 0xfff3bf, 0x4ecdc4];
 let netRole = null;
@@ -311,9 +320,18 @@ const dropEl = document.querySelector('#drop');
 const scoreEl = document.querySelector('#score');
 const comboEl = document.querySelector('#combo');
 const bestEl = document.querySelector('#best');
+const bestsEl = document.querySelector('#bests');
+const bestsList = document.querySelector('#bests-list');
+const bestsToggle = document.querySelector('#bests-toggle');
+const ranksBtn = document.querySelector('#btn-ranks');
+const ranksPanel = document.querySelector('#ranks');
+const ranksList = document.querySelector('#ranks-list');
+const BESTS_KEY = 'ragdoll-bests-open';
+const RANKS_KEY = 'ragdoll-ranks-open';
+let bestsOpen = true;
+let ranksOpen = true;
 const chaosFill = document.querySelector('#chaos-fill');
 const chaosWrap = document.querySelector('#chaos-wrap');
-const badgeTray = document.querySelector('#badges');
 const toastHost = document.querySelector('#toasts');
 const popupHost = document.querySelector('#popups');
 const trapBanner = document.querySelector('#trap-banner');
@@ -353,6 +371,24 @@ try {
   applyHintMin(true, false);
 }
 hintToggle.addEventListener('click', () => applyHintMin(!hintIsMin(), true));
+try {
+  bestsOpen = sessionStorage.getItem(BESTS_KEY) !== '0';
+  ranksOpen = sessionStorage.getItem(RANKS_KEY) !== '0';
+} catch { /* private mode */ }
+setBestsOpen(bestsOpen);
+if (bestsToggle) {
+  bestsToggle.addEventListener('click', () => {
+    setBestsOpen(!bestsOpen);
+    sfx.ui();
+  });
+}
+if (ranksBtn) {
+  ranksBtn.addEventListener('click', () => {
+    setRanksOpen(!ranksOpen);
+    sfx.ui();
+  });
+}
+syncRanks();
 
 const settingsEl = document.querySelector('#settings');
 const settingsBtn = document.querySelector('#btn-settings');
@@ -376,7 +412,6 @@ const gravBtn = document.querySelector('#btn-grav');
 const muteBtn = document.querySelector('#btn-mute');
 
 const popups = createPopups(popupHost, camera);
-renderBadges();
 updateScoreHud(false);
 
 world.addEventListener('beginContact', (e) => {
@@ -666,6 +701,10 @@ window.addEventListener('keydown', (e) => {
     }
   }
   if (e.code === 'KeyM') muteBtn.click();
+  if (e.code === 'KeyL' && netRole) {
+    setRanksOpen(!ranksOpen);
+    sfx.ui();
+  }
 });
 window.addEventListener('keyup', (e) => keys.delete(e.code));
 window.addEventListener('blur', () => {
@@ -966,10 +1005,8 @@ function step(dt) {
   else heliTime = Math.max(0, heliTime - dt * 1.4);
   if (heliTime > 0.5) unlock('heli');
 
-  if (performance.now() - lastScoreAt > comboWindow() && combo !== 0) {
-    combo = 0;
-    updateComboHud();
-  }
+  if (netRole !== 'guest') decayCombos();
+  if (streetLevel() && netRole !== 'guest') watchStunts(dt);
 
   syncDolls(simTime);
   arena.sync(dt, simTime);
@@ -1298,6 +1335,22 @@ function triggerMaxChaos() {
     weakMagnitude: 1,
   })?.catch?.(() => {});
   if (chaosBursts >= 3) unlock('masher');
+  if (streetLevel()) streets.queueToyWave(p.x, p.z);
+  else if (fallLevel()) stairs.dropWave(p);
+  else {
+    const label = props.spawnWave(p.x, p.z);
+    if (label) {
+      callout(label);
+      particles.burst(p.x, p.y + 6, p.z, {
+        colors: [0xffe14a, 0xff5d73, 0x4d96ff, 0xffffff],
+        count: 22,
+        speed: 4,
+        life: 0.7,
+        gravity: 6,
+        up: 2,
+      });
+    }
+  }
 }
 
 function breakFree() {
@@ -1351,17 +1404,25 @@ function handleImpact({ impact, pos, item, direct, flair, duckOrbit }) {
   if (item && props.knockTypes.has(item.type) && impact > 2.8) registerKnock(item);
 }
 
-function addScore(base, pos, impact, flair) {
+function addScore(base, pos, impact, flair, by) {
+  const id = scorerId(by);
+  const row = pointRow(id);
   const now = performance.now();
-  if (now - lastScoreAt > comboWindow()) combo = 0;
-  combo += 1;
+  if (now - row.comboAt > comboWindow()) row.combo = 0;
+  row.combo += 1;
+  row.comboAt = now;
   lastScoreAt = now;
-  const mult = currentMult();
+  const mult = id === myId() ? currentMultFrom(row.combo) : comboMult(row.combo);
   const pts = Math.max(1, Math.round(base * mult));
-  score += pts;
-  if (score > best) {
-    best = score;
-    persist();
+  row.score += pts;
+  if (id === myId()) {
+    score = row.score;
+    combo = row.combo;
+    if (score > best) {
+      best = score;
+      persist();
+    }
+    if (noteRecord('combo', combo)) shoutRecord('combo', `COMBO x${records.combo}`);
   }
   if (popupsThisFrame < 12) {
     popups.spawn(pos, flair ? `${flair} +${pts}` : `+${pts}`, flair ? 'smash' : 'plus');
@@ -1370,17 +1431,25 @@ function addScore(base, pos, impact, flair) {
       popups.spawn({ x: pos.x, y: pos.y + 0.45, z: pos.z }, impact > 14 ? 'SMASH!' : 'POW!', impact > 14 ? 'smash' : 'pow');
       popupsThisFrame += 1;
     }
-    if (combo > 1 && combo % 6 === 0 && popupsThisFrame < 12) {
+    if (row.combo > 1 && row.combo % 6 === 0 && popupsThisFrame < 12) {
       popups.spawn({ x: pos.x, y: pos.y + 0.75, z: pos.z }, `x${mult} COMBO`, 'combo');
       popupsThisFrame += 1;
     }
   }
-  updateScoreHud(true);
+  if (id === myId()) updateScoreHud(true);
+  else if (netRole === 'host') renderRanks();
+}
+
+function comboMult(count) {
+  return Math.min(15, 1 + Math.floor(Math.max(0, count - 1) / 2));
+}
+
+function currentMultFrom(count) {
+  return comboMult(count) * (maxChaosTimer > 0 ? 3 : 1);
 }
 
 function currentMult() {
-  const fromCombo = Math.min(15, 1 + Math.floor(Math.max(0, combo - 1) / 2));
-  return fromCombo * (maxChaosTimer > 0 ? 3 : 1);
+  return currentMultFrom(combo);
 }
 
 function registerKnock(item) {
@@ -1394,13 +1463,18 @@ function registerKnock(item) {
   if (ids.size >= 50) unlock('wrecking');
 }
 
+function badgePlace() {
+  if (streetLevel()) return 'street';
+  if (fallLevel()) return 'stairs';
+  return 'toy';
+}
+
 function unlock(id) {
-  if (!started || streetLevel() || unlocked.has(id)) return;
+  if (!started || unlocked.has(id)) return;
   const badge = BADGES.find((b) => b.id === id);
-  if (!badge) return;
+  if (!badge || badge.where !== badgePlace()) return;
   unlocked.add(id);
   persist();
-  renderBadges();
   sfx.badge();
   const toast = document.createElement('div');
   toast.className = 'toast';
@@ -1536,6 +1610,10 @@ function comboWindow() {
 function freshRun() {
   score = 0;
   combo = 0;
+  points.clear();
+  tricks.clear();
+  bestAir = 0;
+  pointRow(myId());
   charge = 0;
   maxChaosTimer = 0;
   trapped = false;
@@ -1544,7 +1622,9 @@ function freshRun() {
   heliTime = 0;
   streak = 0;
   knocks.length = 0;
+  if (ranksList) delete ranksList.dataset.sig;
   updateScoreHud(false);
+  renderRanks();
 }
 
 function setFloppy(on) {
@@ -1709,7 +1789,6 @@ function launchLevel() {
     gravity: 7,
     up: 3,
   });
-  badgeTray.hidden = streetLevel();
   nestBtn.hidden = !streetLevel();
   updateScoreHud(false);
   if (netRole === 'guest') {
@@ -1816,9 +1895,283 @@ function streetVictim(e) {
 }
 
 function dollPeerId(doll) {
-  if (!doll || doll === ragdoll) return selfPeerId || 'host';
+  if (!doll || doll === ragdoll) return myId();
   for (const peer of roster.values()) if (peer.doll === doll) return peer.id;
   return '';
+}
+
+function myId() {
+  if (selfPeerId) return selfPeerId;
+  if (netRole === 'host') return 'host';
+  if (netRole === 'guest') return 'guest';
+  return 'local';
+}
+
+function scorerId(by) {
+  if (by && typeof by === 'object') return dollPeerId(by) || myId();
+  return myId();
+}
+
+function pointRow(id) {
+  let row = points.get(id);
+  if (!row) {
+    row = { score: 0, combo: 0, comboAt: 0 };
+    points.set(id, row);
+  }
+  return row;
+}
+
+function trickRow(id) {
+  let row = tricks.get(id);
+  if (!row) {
+    row = { riding: false, ride: 0, bestRide: 0, bestRoof: 0, bestFall: 0, falling: false, fallPeak: 0 };
+    tricks.set(id, row);
+  }
+  return row;
+}
+
+function decayCombos() {
+  const now = performance.now();
+  const windowMs = comboWindow();
+  let changed = false;
+  for (const [id, row] of points) {
+    if (!row.combo || now - row.comboAt <= windowMs) continue;
+    row.combo = 0;
+    changed = true;
+    if (id === myId()) recordShout.combo = false;
+  }
+  const mine = points.get(myId());
+  const next = mine ? mine.combo : 0;
+  if (next !== combo) {
+    combo = next;
+    updateComboHud();
+  } else if (changed) renderRanks();
+}
+
+const RECORD_MIN = { ride: 5, roof: 3, combo: 2, air: 1, fall: 4 };
+const RECORD_META = [
+  { id: 'ride', label: 'RIDE', suffix: 'm' },
+  { id: 'roof', label: 'ROOF', suffix: 'm' },
+  { id: 'combo', label: 'COMBO', suffix: '' },
+  { id: 'air', label: 'CARS', suffix: '' },
+  { id: 'fall', label: 'FALL', suffix: 'm' },
+];
+
+function blankRecords() {
+  return { ride: 0, roof: 0, combo: 0, air: 0, fall: 0 };
+}
+
+function readRecords(raw) {
+  const out = blankRecords();
+  if (!raw || typeof raw !== 'object') return out;
+  for (const key of Object.keys(out)) out[key] = Math.max(0, Math.floor(Number(raw[key]) || 0));
+  return out;
+}
+
+function formatRecord(key, value) {
+  const meta = RECORD_META.find((row) => row.id === key);
+  const n = Math.floor(value) || 0;
+  if (key === 'combo') return n > 0 ? `x${n}` : '—';
+  if (!n) return '—';
+  return meta && meta.suffix ? `${n}${meta.suffix}` : String(n);
+}
+
+function noteRecord(key, value) {
+  const next = Math.floor(value);
+  if (next < RECORD_MIN[key] || !(next > records[key])) return false;
+  records[key] = next;
+  persist();
+  renderBests();
+  return true;
+}
+
+function shoutRecord(key, text) {
+  if (recordShout[key]) return;
+  recordShout[key] = true;
+  callout(text);
+}
+
+function watchStunts(dt) {
+  const aloft = streets.carsAloft();
+  if (aloft > bestAir) bestAir = aloft;
+  if (noteRecord('air', aloft)) shoutRecord('air', `${records.air} CARS UP`);
+  if (!aloft) recordShout.air = false;
+  if (netRole === 'host') {
+    for (const peer of roster.values()) {
+      if (aloft > (peer.airBest || 0)) peer.airBest = aloft;
+    }
+  }
+  const tracked = [{ id: myId(), doll: ragdoll }];
+  if (netRole === 'host') {
+    for (const peer of roster.values()) {
+      if (peer.doll) tracked.push({ id: peer.id, doll: peer.doll });
+    }
+  }
+  for (const entry of tracked) {
+    const trick = trickRow(entry.id);
+    const driving = streets.drivingDoll(entry.doll);
+    if (driving) {
+      if (!trick.riding) {
+        trick.riding = true;
+        trick.ride = 0;
+        if (entry.id === myId()) recordShout.ride = false;
+      }
+      trick.ride += streets.driveSpeed(entry.doll) * dt;
+      if (trick.ride > trick.bestRide) trick.bestRide = trick.ride;
+    } else if (trick.riding) trick.riding = false;
+    const roof = streets.roofMeters(entry.doll);
+    trick.roofNow = roof;
+    if (roof > trick.bestRoof) trick.bestRoof = roof;
+    const body = entry.doll.walking() ? entry.doll.mover() : entry.doll.torso.body;
+    const armed = streets.holding(entry.doll);
+    if (!armed || !body) trick.falling = false;
+    else if (body.velocity.y < -1.5 && body.position.y > GROUND_Y + 2) {
+      if (!trick.falling) trick.fallPeak = body.position.y;
+      trick.falling = true;
+      if (body.position.y > trick.fallPeak) trick.fallPeak = body.position.y;
+    } else if (trick.falling && body.velocity.y > -0.5) {
+      const drop = trick.fallPeak - body.position.y;
+      if (drop > trick.bestFall) trick.bestFall = drop;
+      trick.falling = false;
+    }
+    if (entry.id !== myId()) continue;
+    if (noteRecord('ride', trick.bestRide)) shoutRecord('ride', `RIDE ${records.ride}m`);
+    if (!trick.riding) recordShout.ride = false;
+    if (noteRecord('roof', trick.bestRoof)) shoutRecord('roof', `ROOF ${records.roof}m`);
+    if (!roof) recordShout.roof = false;
+    if (noteRecord('fall', trick.bestFall)) shoutRecord('fall', `FALL ${records.fall}m`);
+    if (!trick.falling) recordShout.fall = false;
+  }
+}
+
+function boardRows() {
+  const rows = [];
+  const me = pointRow(myId());
+  const up = streetLevel() ? streets.carsAloft() : 0;
+  rows.push(packBoard(myId(), myName(), myColor, me, trickRow(myId()), bestAir, up));
+  if (netRole === 'host') {
+    for (const peer of roster.values()) {
+      rows.push(packBoard(
+        peer.id,
+        peer.name,
+        peer.color,
+        pointRow(peer.id),
+        trickRow(peer.id),
+        peer.airBest || 0,
+        up,
+      ));
+    }
+  }
+  rows.sort((a, b) => b.score - a.score || String(a.name).localeCompare(String(b.name)));
+  return rows;
+}
+
+function packBoard(id, name, color, row, trick, air, up) {
+  return {
+    id,
+    name: name || 'Chicken',
+    color: color || FEATHERS[0],
+    score: row.score,
+    combo: row.combo,
+    ride: Math.floor(trick.bestRide),
+    roof: Math.floor(trick.bestRoof),
+    fall: Math.floor(trick.bestFall),
+    air: Math.floor(air) || 0,
+    up: Math.floor(up) || 0,
+    riding: trick.riding ? 1 : 0,
+    roofNow: Math.floor(trick.roofNow) || 0,
+    fallNow: trick.falling ? 1 : 0,
+  };
+}
+
+function renderBests() {
+  if (!bestsList) return;
+  bestsList.replaceChildren();
+  for (const meta of RECORD_META) {
+    const item = document.createElement('li');
+    const label = document.createElement('b');
+    label.textContent = meta.label;
+    const value = document.createElement('span');
+    value.textContent = formatRecord(meta.id, records[meta.id]);
+    item.append(label, value);
+    bestsList.appendChild(item);
+  }
+}
+renderBests();
+
+function renderRanks(rows) {
+  if (!ranksList || !netRole) return;
+  const list = rows || boardRows();
+  const signature = list.map((row) => `${row.id}:${row.score}:${row.name}`).join('|');
+  if (signature === ranksList.dataset.sig) return;
+  ranksList.dataset.sig = signature;
+  ranksList.replaceChildren();
+  list.forEach((row, index) => {
+    const item = document.createElement('li');
+    if (row.id === myId() || row.id === selfPeerId) item.className = 'me';
+    const who = document.createElement('span');
+    const swatch = document.createElement('i');
+    swatch.style.background = cssColor(row.color);
+    who.append(swatch, document.createTextNode(`${index + 1} ${row.name}`));
+    const pts = document.createElement('b');
+    pts.textContent = String(row.score);
+    item.append(who, pts);
+    ranksList.appendChild(item);
+  });
+}
+
+function cssColor(n) {
+  return `#${(Number(n) >>> 0).toString(16).padStart(6, '0').slice(-6)}`;
+}
+
+function applyRemoteBoard(rows) {
+  if (!Array.isArray(rows)) return;
+  renderRanks(rows);
+  const mine = rows.find((row) => row.id === selfPeerId);
+  if (!mine) return;
+  const punched = mine.score !== score;
+  score = mine.score || 0;
+  combo = mine.combo || 0;
+  if (score > best) {
+    best = score;
+    persist();
+  }
+  if (!combo) recordShout.combo = false;
+  if (noteRecord('combo', combo)) shoutRecord('combo', `COMBO x${records.combo}`);
+  if (!mine.riding) recordShout.ride = false;
+  if (noteRecord('ride', mine.ride || 0)) shoutRecord('ride', `RIDE ${records.ride}m`);
+  if (!mine.roofNow) recordShout.roof = false;
+  if (noteRecord('roof', mine.roof || 0)) shoutRecord('roof', `ROOF ${records.roof}m`);
+  if (!mine.fallNow) recordShout.fall = false;
+  if (noteRecord('fall', mine.fall || 0)) shoutRecord('fall', `FALL ${records.fall}m`);
+  if (!mine.up) recordShout.air = false;
+  if (noteRecord('air', mine.air || 0)) shoutRecord('air', `${records.air} CARS UP`);
+  updateScoreHud(punched);
+}
+
+function syncRanks() {
+  const online = !!netRole && started;
+  if (ranksBtn) ranksBtn.hidden = !online;
+  if (!ranksPanel) return;
+  ranksPanel.hidden = !online || !ranksOpen;
+  if (ranksBtn) {
+    ranksBtn.textContent = 'RANKS';
+    ranksBtn.title = ranksOpen ? 'Hide the room ranks (L)' : 'Show the room ranks (L)';
+    ranksBtn.setAttribute('aria-pressed', ranksOpen ? 'true' : 'false');
+  }
+}
+
+function setRanksOpen(open) {
+  ranksOpen = !!open;
+  try { sessionStorage.setItem(RANKS_KEY, ranksOpen ? '1' : '0'); } catch { /* private mode */ }
+  syncRanks();
+}
+
+function setBestsOpen(open) {
+  bestsOpen = !!open;
+  if (bestsEl) bestsEl.classList.toggle('is-hidden', !bestsOpen);
+  if (bestsToggle) bestsToggle.setAttribute('aria-expanded', bestsOpen ? 'true' : 'false');
+  try { sessionStorage.setItem(BESTS_KEY, bestsOpen ? '1' : '0'); } catch { /* private mode */ }
 }
 
 function onStreetEvent(e) {
@@ -1842,9 +2195,10 @@ function onStreetEvent(e) {
       boom: !!(victim && e.boom),
     });
   }
+  if (e.unlock && (!e.who || e.who === ragdoll)) unlock(e.unlock);
   if (e.callout) callout(e.callout);
   if (e.shake) shake(e.shake);
-  if (e.score && e.pos) addScore(e.score, e.pos, e.impact || 6, e.flair || null);
+  if (e.score && e.pos) addScore(e.score, e.pos, e.impact || 6, e.flair || null, e.by);
   if (e.burst && e.pos) {
     const colors = e.burst === 'boom'
       ? [0xfff1a8, 0xff7a18, 0xff3355, 0x2b2f38, 0xffffff]
@@ -2073,23 +2427,13 @@ function updateScoreHud(punch) {
     scoreEl.classList.add('pop');
   }
   updateComboHud();
+  if (netRole === 'host') renderRanks();
 }
 
 function updateComboHud() {
   const mult = currentMult();
   comboEl.textContent = combo > 1 ? `x${mult} COMBO` : 'COMBO';
   comboEl.style.opacity = combo > 1 ? '1' : '0.55';
-}
-
-function renderBadges() {
-  badgeTray.replaceChildren();
-  for (const badge of BADGES) {
-    const el = document.createElement('div');
-    el.className = `badge${unlocked.has(badge.id) ? ' got' : ''}`;
-    el.textContent = badge.icon;
-    el.title = `${badge.name} — ${badge.desc}`;
-    badgeTray.appendChild(el);
-  }
 }
 
 let calloutTimer = 0;
@@ -2233,23 +2577,30 @@ function createPopups(host, cam) {
 }
 
 function loadSave() {
+  const empty = { badges: [], best: 0, bestDrop: 0, records: blankRecords() };
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    if (!raw) return { badges: [], best: 0, bestDrop: 0 };
+    if (!raw) return empty;
     const data = JSON.parse(raw);
     return {
       badges: Array.isArray(data.badges) ? data.badges : [],
       best: Number(data.best) || 0,
       bestDrop: Number(data.bestDrop) || 0,
+      records: readRecords(data.records),
     };
   } catch {
-    return { badges: [], best: 0, bestDrop: 0 };
+    return empty;
   }
 }
 
 function persist() {
   try {
-    localStorage.setItem(SAVE_KEY, JSON.stringify({ badges: [...unlocked], best, bestDrop }));
+    localStorage.setItem(SAVE_KEY, JSON.stringify({
+      badges: [...unlocked],
+      best,
+      bestDrop,
+      records,
+    }));
   } catch {
     /* private mode */
   }
@@ -2302,6 +2653,7 @@ window.__GAME__ = {
       meters: fallLevel() ? stairs.meters() : 0,
       score,
       best,
+      records: { ...records },
       combo,
       multiplier: currentMult(),
       charge,
@@ -2430,6 +2782,7 @@ function returnToMainMenu() {
 }
 
 function refreshNetBadge() {
+  syncRanks();
   const badge = document.querySelector('#net-badge');
   if (!badge) return;
   if (!netRole || !roomCode) {
@@ -2958,6 +3311,7 @@ function publishNet(dt) {
     packet = {
       t: 'snap',
       score,
+      board: boardRows(),
       players: capturePlayers(),
       city,
     };
@@ -3393,7 +3747,8 @@ function onNetMessage(data, peerId) {
     }
   } else if (data.t === 'snap') {
     pendingSnap = data;
-    if (typeof data.score === 'number') {
+    if (Array.isArray(data.board)) applyRemoteBoard(data.board);
+    else if (typeof data.score === 'number') {
       score = data.score;
       if (started) updateScoreHud(false);
     }
@@ -3437,6 +3792,8 @@ function onPeerJoin(peerId) {
   broadcastRoster();
   if (started) netSend({ t: 'go' }, peerId);
   renderFriends();
+  if (ranksList) delete ranksList.dataset.sig;
+  renderRanks();
 }
 
 function onPeerLeave(peerId) {
@@ -3463,6 +3820,8 @@ function onPeerLeave(peerId) {
   syncActors();
   broadcastRoster();
   renderFriends();
+  if (ranksList) delete ranksList.dataset.sig;
+  renderRanks();
 }
 
 async function leaveOnline() {
@@ -3486,6 +3845,7 @@ async function leaveOnline() {
   if (current) await current.leave().catch(() => {});
   myColor = FEATHERS[0];
   ragdoll.recolor(myColor);
+  syncRanks();
   streets.setMirror(false);
   streets.setShared(false);
   streets.setViewerDrive(null);
@@ -3520,7 +3880,18 @@ async function openRoom(code, role) {
       onError: (error) => setRoomStatus(error.message || 'Connection problem. Try the room again.'),
     });
     await session.ready;
+    const previousId = myId();
     selfPeerId = await session.selfId();
+    if (previousId !== selfPeerId) {
+      if (points.has(previousId)) {
+        points.set(selfPeerId, points.get(previousId));
+        points.delete(previousId);
+      }
+      if (tricks.has(previousId)) {
+        tricks.set(selfPeerId, tricks.get(previousId));
+        tricks.delete(previousId);
+      }
+    }
     streets.setShared(true);
   } catch (error) {
     netRole = null;

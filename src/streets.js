@@ -71,7 +71,58 @@ function laneOffset(axis, slot) {
   return slot === 0 ? ROAD * 0.72 : ROAD * 0.28;
 }
 
+const FLEETS = {
+  main: ['sedan', 'taxi', 'bus', 'police'],
+  market: ['van', 'wagon', 'taxi'],
+  harbor: ['truck', 'diesel', 'van'],
+  carnival: ['sport', 'cyber', 'bus'],
+};
+
+const DISTRICT_NAME = {
+  main: 'MAIN STREET',
+  market: 'THE MARKET',
+  harbor: 'THE HARBOR',
+  carnival: 'NIGHT CARNIVAL',
+};
+
+function districtId(gx, gz) {
+  const east = gx >= CITY / 2;
+  const north = gz >= CITY / 2;
+  if (!north && !east) return 'main';
+  if (!north && east) return 'market';
+  if (north && !east) return 'harbor';
+  return 'carnival';
+}
+
+function kindById(id) {
+  for (const kind of KINDS) if (kind.id === id) return kind;
+  return KINDS[0];
+}
+
+function fleetKind(district, salt) {
+  const ids = FLEETS[district] || FLEETS.main;
+  const n = salt < 0 ? -salt : salt;
+  return kindById(ids[n % ids.length]);
+}
+
+function fleetPaint(district, kind) {
+  if (district === 'carnival') {
+    if (kind.id === 'bus') return 0xff2bd6;
+    if (kind.id === 'sport') return 0xffe14a;
+    if (kind.id === 'cyber') return 0x7af0ff;
+  }
+  if (district === 'harbor' && kind.id === 'truck') return 0x145a78;
+  if (district === 'market' && kind.id === 'wagon') return 0xd86b2a;
+  return null;
+}
+
 export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, toyMat, onEvent }) {
+  let creditDoll = null;
+  const reportStreet = onEvent;
+  onEvent = (event) => {
+    if (event && event.score && !event.by && creditDoll) event.by = creditDoll;
+    reportStreet(event);
+  };
   const root = new THREE.Group();
   root.visible = false;
   scene.add(root);
@@ -201,6 +252,23 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   const leafMat = art.plastic(0x2f9e44, { roughness: 0.78 });
   const flowerMats = [0xff5d73, 0xffd23f, 0xc77dff, 0xff922b].map((color) => art.plastic(color, { roughness: 0.45 }));
   const umbrellaMats = [0xff5d73, 0xffd23f, 0x4d96ff, 0xf4f1ea].map((color) => art.plastic(color, { roughness: 0.55 }));
+  const crateMat = art.plastic(0xc4844a, { roughness: 0.78 });
+  const dockMat = art.plastic(0xb08968, { roughness: 0.9 });
+  const dockLine = art.plastic(0x8d6a45, { roughness: 0.92 });
+  const boatHull = art.plastic(0xf4f1ea, { roughness: 0.55 });
+  const buoyMat = art.plastic(0xff6a1a, { roughness: 0.4, emissive: 0xff4d00 });
+  buoyMat.emissiveIntensity = 0.35;
+  const nightMat = art.plastic(0x24143f, { roughness: 0.88 });
+  const nightCloth = art.plastic(0x3a215c, { roughness: 0.72 });
+  const nightPost = art.plastic(0x1a102c, { roughness: 0.6, metalness: 0.2 });
+  function glowPlastic(color) {
+    const material = art.plastic(color, { emissive: color, roughness: 0.28 });
+    material.emissiveIntensity = 1.35;
+    return material;
+  }
+  const neonPink = glowPlastic(0xff3d8a);
+  const neonCyan = glowPlastic(0x3de4ff);
+  const neonYellow = glowPlastic(0xffe14a);
   const brickMat = art.plastic(0xd4765a, { roughness: 0.8 });
   const concreteMat = art.plastic(0xb7c0cc, { roughness: 0.78 });
   const barMat = art.plastic(0x1a1e24, { roughness: 0.42, metalness: 0.62 });
@@ -218,6 +286,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   const roundGeo = new THREE.CylinderGeometry(1, 1, 1, 14);
   const coneGeo = new THREE.ConeGeometry(1, 1, 12);
   const hoopGeo = new THREE.TorusGeometry(0.34, 0.035, 6, 14);
+  const ferrisGeo = new THREE.TorusGeometry(2.6, 0.1, 6, 22);
   const poleGeo = new THREE.CylinderGeometry(0.06, 0.08, 2.3, 6);
   const postGeo = new THREE.CylinderGeometry(0.07, 0.09, 1.12, 6);
   const signalHousingGeo = new THREE.BoxGeometry(0.42, 1.05, 0.42);
@@ -231,6 +300,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   const weapons = createWeapons(scene, art);
   let nextCarId = 1;
   let nextJunkId = 1;
+  let nextPrizeId = 1;
+  const WAVE_THEMES = ['ducks', 'pins', 'float'];
+  const WAVE_LABEL = { ducks: 'DUCKS!', pins: 'PINS!', float: 'PARADE!' };
+  let waveCursor = 0;
+  let waveReadyAt = 0;
+  const waveQueue = [];
   let mirror = false;
   let shared = false;
   let actors = [ragdoll];
@@ -252,6 +327,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let district = null;
   const districtBodies = [];
   let hits = 0;
+  let seenDistrict = '';
+  const tallies = { meter: 0, cart: 0, balloon: 0 };
   let running = false;
   let stillTime = 0;
   let campX = 0;
@@ -691,6 +768,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       score: spec.score,
       pad: spec.pad,
       shapes: spec.shapes,
+      mark: spec.mark || '',
     });
   }
 
@@ -1622,15 +1700,366 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     addTrash(tile, 9.2, 19.5);
   }
 
+  function addCrate(tile, x, z, scale, mark, yell) {
+    const s = scale || 1;
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, box, crateMat, 0, 0.32 * s, 0, 0.72 * s, 0.58 * s, 0.72 * s);
+    put(group, box, woodDark, 0, 0.32 * s, 0, 0.08 * s, 0.6 * s, 0.76 * s);
+    put(group, box, woodDark, 0, 0.32 * s, 0, 0.76 * s, 0.6 * s, 0.08 * s);
+    knock(tile, group, {
+      id: tag(tile, mark || 'crate', x, z),
+      kind: 'crate',
+      mark,
+      lx: x,
+      lz: z,
+      h: 0.7 * s,
+      radius: 0.55 * s,
+      reachH: 1.1,
+      mass: 5 * s,
+      kick: 3.4,
+      up: 1.8,
+      spin: 3.2,
+      yell: yell || 'CRATE!',
+      score: 8,
+      pad: 0.55,
+      shapes: [offsetShape(new CANNON.Vec3(0.36 * s, 0.3 * s, 0.36 * s), 0, 0.32 * s, 0)],
+    });
+  }
+
+  function addCart(tile, x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, box, crateMat, 0, 0.55, 0, 1.15, 0.55, 1.7);
+    for (const [wx, wz] of [[-0.55, 0.55], [0.55, 0.55], [-0.55, -0.55], [0.55, -0.55]]) {
+      const wheel = put(group, roundGeo, tire, wx, 0.22, wz, 0.22, 0.16, 0.22);
+      wheel.rotation.z = Math.PI / 2;
+    }
+    put(group, crownGeo, flowerMats[0], -0.28, 1.05, 0.1, 0.28, 0.28, 0.28);
+    put(group, crownGeo, flowerMats[1], 0.22, 1.12, -0.12, 0.32, 0.32, 0.32);
+    put(group, crownGeo, flowerMats[3], 0.02, 0.98, 0.32, 0.24, 0.24, 0.24);
+    knock(tile, group, {
+      id: tag(tile, 'cart', x, z),
+      kind: 'cart',
+      mark: 'cart',
+      lx: x,
+      lz: z,
+      h: 1.2,
+      radius: 1.15,
+      reachH: 1.7,
+      mass: 8,
+      kick: 3.2,
+      up: 1.6,
+      spin: 2.4,
+      yell: 'CART!',
+      score: 12,
+      pad: 0.85,
+      shapes: [offsetShape(new CANNON.Vec3(0.58, 0.4, 0.85), 0, 0.55, 0)],
+    });
+  }
+
+  function addStall(tile, x, z, label, tint) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, box, crateMat, 0, 0.5, 0, 2.4, 1.0, 1.15);
+    put(group, box, woodDark, 0, 1.02, 0, 2.55, 0.08, 1.28);
+    const board = new THREE.Mesh(plane, signTexture(label, '#fff6ea', '#1c140c'));
+    board.scale.set(1.35, 0.42, 1);
+    board.position.set(0, 1.38, -0.66);
+    group.add(board);
+    tile.group.add(group);
+    addStatic(tile, 2.4, 1.05, 1.2, x, GROUND_Y + 0.52, z);
+    addAwning(
+      tile,
+      x,
+      GROUND_Y + 2.15,
+      z - 0.95,
+      2.55,
+      1.15,
+      umbrellaMats[tint % umbrellaMats.length],
+      tag(tile, 'stall', x, z),
+    );
+  }
+
+  function addMeter(tile, x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, poleGeo, poleMat, 0, 0.55, 0, 0.4, 0.5, 0.4);
+    put(group, box, signMat, 0, 1.15, 0, 0.28, 0.42, 0.16);
+    put(group, box, holeMat, 0, 1.18, 0.09, 0.16, 0.18, 0.02);
+    knock(tile, group, {
+      id: tag(tile, 'meter', x, z),
+      kind: 'meter',
+      mark: 'meter',
+      lx: x,
+      lz: z,
+      h: 1.35,
+      radius: 0.4,
+      reachH: 1.6,
+      mass: 4,
+      kick: 3.6,
+      up: 1.5,
+      spin: 3.4,
+      yell: 'TICKET!',
+      score: 8,
+      pad: 0.45,
+      shapes: [offsetShape(new CANNON.Vec3(0.14, 0.62, 0.1), 0, 0.62, 0)],
+    });
+  }
+
+  function addBollard(tile, x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, roundGeo, metalMat, 0, 0.42, 0, 0.14, 0.8, 0.14);
+    put(group, roundGeo, hydrantMat, 0, 0.86, 0, 0.18, 0.1, 0.18);
+    knock(tile, group, {
+      id: tag(tile, 'bollard', x, z),
+      kind: 'bollard',
+      lx: x,
+      lz: z,
+      h: 1,
+      radius: 0.35,
+      reachH: 1.2,
+      mass: 7,
+      kick: 2.4,
+      up: 1.1,
+      spin: 2,
+      yell: 'BOLLARD!',
+      score: 6,
+      pad: 0.4,
+      shapes: [offsetShape(new CANNON.Vec3(0.16, 0.42, 0.16), 0, 0.42, 0)],
+    });
+  }
+
+  function addBuoy(tile, x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, crownGeo, buoyMat, 0, 0.55, 0, 0.42, 0.62, 0.42);
+    put(group, box, white, 0, 0.55, 0, 0.48, 0.12, 0.48);
+    knock(tile, group, {
+      id: tag(tile, 'buoy', x, z),
+      kind: 'buoy',
+      lx: x,
+      lz: z,
+      h: 1.1,
+      radius: 0.5,
+      reachH: 1.4,
+      mass: 3,
+      kick: 5,
+      up: 2.4,
+      spin: 4,
+      yell: 'BUOY!',
+      score: 8,
+      pad: 0.5,
+      shapes: [offsetShape(new CANNON.Vec3(0.32, 0.32, 0.32), 0, 0.55, 0)],
+    });
+  }
+
+  function addBoat(tile, x, z, yaw) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    group.rotation.y = yaw;
+    put(group, box, boatHull, 0, 0.38, 0, 1.35, 0.48, 3.1);
+    put(group, box, dockLine, 0, 0.68, -0.15, 1.05, 0.22, 1.35);
+    put(group, poleGeo, woodDark, 0.15, 1.35, 0.55, 0.45, 1.05, 0.45);
+    knock(tile, group, {
+      id: tag(tile, 'boat', x, z),
+      kind: 'boat',
+      lx: x,
+      lz: z,
+      h: 1.4,
+      radius: 1.9,
+      reachH: 2.2,
+      mass: 16,
+      kick: 2.2,
+      up: 1.1,
+      spin: 1.4,
+      yell: 'BOAT!',
+      score: 18,
+      pad: 1.1,
+      shapes: [offsetShape(new CANNON.Vec3(0.68, 0.32, 1.55), 0, 0.4, 0)],
+    });
+  }
+
+  function addBalloon(tile, x, z, material) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, box, nightPost, 0, 1.05, 0, 0.035, 2.1, 0.035);
+    put(group, crownGeo, material, 0, 2.25, 0, 0.48, 0.62, 0.48);
+    knock(tile, group, {
+      id: tag(tile, 'balloon', x, z),
+      kind: 'balloon',
+      mark: 'balloon',
+      lx: x,
+      lz: z,
+      h: 2.5,
+      radius: 0.55,
+      reachH: 2.9,
+      mass: 0.7,
+      kick: 6,
+      up: 4.2,
+      spin: 5,
+      yell: 'POP!',
+      score: 8,
+      pad: 0.45,
+      shapes: [offsetShape(new CANNON.Vec3(0.28, 0.36, 0.28), 0, 2.25, 0)],
+    });
+  }
+
+  function addBulb(tile, x, y, z, material) {
+    const mesh = new THREE.Mesh(signalLensGeo, material);
+    mesh.position.set(x, y, z);
+    tile.group.add(mesh);
+  }
+
+  function addStringLights(tile, y) {
+    const z0 = ROAD + 2.4;
+    const z1 = CELL - 1.7;
+    const x0 = ROAD + 2.4;
+    const x1 = CELL - 1.7;
+    const bulbs = [neonPink, neonCyan, neonYellow];
+    let i = 0;
+    for (let x = x0; x <= x1; x += 1.65) {
+      addBulb(tile, x, y, z0, bulbs[i % 3]);
+      i += 1;
+      addBulb(tile, x, y, z1, bulbs[i % 3]);
+      i += 1;
+    }
+    for (let z = z0 + 1.65; z < z1; z += 1.65) {
+      addBulb(tile, x0, y, z, bulbs[i % 3]);
+      i += 1;
+      addBulb(tile, x1, y, z, bulbs[i % 3]);
+      i += 1;
+    }
+  }
+
+  function addTent(tile, x, z, material) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, box, nightCloth, 0, 0.7, 0, 2.5, 1.25, 2.5);
+    put(group, coneGeo, material, 0, 1.85, 0, 1.7, 1.5, 1.7);
+    tile.group.add(group);
+    addStatic(tile, 2.4, 2.2, 2.4, x, GROUND_Y + 1.1, z);
+  }
+
+  function addWheel(tile, x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    const ring = new THREE.Mesh(ferrisGeo, neonPink);
+    ring.position.y = 3.15;
+    group.add(ring);
+    put(group, box, nightPost, -1.2, 1.55, 0, 0.16, 3.1, 0.16);
+    put(group, box, nightPost, 1.2, 1.55, 0, 0.16, 3.1, 0.16);
+    const gondolas = [neonYellow, neonCyan, neonPink];
+    for (let i = 0; i < 6; i++) {
+      const angle = (i / 6) * Math.PI * 2;
+      put(group, box, gondolas[i % 3], Math.cos(angle) * 2.55, 3.15 + Math.sin(angle) * 2.55, 0, 0.42, 0.3, 0.32);
+    }
+    tile.group.add(group);
+    addStatic(tile, 0.35, 3.2, 0.4, x - 1.2, GROUND_Y + 1.6, z);
+    addStatic(tile, 0.35, 3.2, 0.4, x + 1.2, GROUND_Y + 1.6, z);
+  }
+
+  function addBooth(tile, x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, GROUND_Y, z);
+    put(group, box, nightCloth, 0, 0.7, 0, 3.2, 1.4, 1.35);
+    put(group, box, neonPink, 0, 1.5, 0, 3.4, 0.14, 1.55);
+    const board = new THREE.Mesh(plane, signTexture('PRIZES', '#ff3d8a', '#fff6fb'));
+    board.scale.set(1.6, 0.48, 1);
+    board.position.set(0, 1.92, -0.78);
+    group.add(board);
+    tile.group.add(group);
+    addStatic(tile, 3.2, 1.7, 1.4, x, GROUND_Y + 0.85, z);
+  }
+
+  function districtSign(tile, text, bg, fg) {
+    hangSign(tile, text, bg, fg, 17, GROUND_Y + 4.35, ROAD + 1.75, Math.PI, 2.7, 0.7);
+  }
+
+  function buildMain(tile, h) {
+    const pick = h % 4;
+    if (pick === 0) buildTower(tile, h);
+    else if (pick === 1) buildShops(tile, h);
+    else if (pick === 2) buildCafe(tile, h);
+    else buildSchool(tile);
+    for (const x of [11.4, 14.2, 20.2, 23.2]) addMeter(tile, x, ROAD + 1.35);
+    districtSign(tile, 'MAIN ST', '#1c2430', '#ffe14a');
+  }
+
+  function buildMarket(tile) {
+    yard(tile, plazaMat, 1.15, 0.05);
+    const names = ['FRUIT', 'FISH', 'BREAD'];
+    names.forEach((label, i) => addStall(tile, 12.2 + i * 4.3, 14.4, label, i));
+    addCart(tile, 13.4, 20.2);
+    addCart(tile, 19.6, 21.2);
+    addCrate(tile, 22.8, 16.4, 1, 'cart', 'CRATE!');
+    addCrate(tile, 23.5, 17.3, 0.8, 'cart', 'CRATE!');
+    addCrate(tile, 12.6, 17.8, 1.05, 'cart', 'CRATE!');
+    districtSign(tile, 'MARKET', '#d86b2a', '#fff6ea');
+  }
+
+  function buildHarbor(tile) {
+    yard(tile, dockMat, 1.1, 0.05);
+    for (let i = 0; i < 5; i++) {
+      addPlane(tile, dockLine, 14.5, 0.1, 17.2, 12.2 + i * 2.5, GROUND_Y + 0.07);
+    }
+    addCrate(tile, 20.4, 14.2, 1);
+    addCrate(tile, 21.2, 15.1, 0.8);
+    addCrate(tile, 20.6, 16, 0.7);
+    addCrate(tile, 14.2, 18.6, 1.1);
+    addBollard(tile, 12.2, 12.4);
+    addBollard(tile, 22.6, 20.4);
+    if (tile.gz === CITY - 1) {
+      addBoat(tile, 16.2, 21.5, 0.12);
+      addBuoy(tile, 11.2, 22.5);
+    } else if (tile.gx === 0) {
+      addBoat(tile, 12.4, 18.2, Math.PI / 2);
+      addBuoy(tile, 10.6, 13.4);
+    } else {
+      addStructure(tile, {
+        x: 15.2,
+        z: 15.6,
+        w: 6.2,
+        d: 4.8,
+        bh: 3.5,
+        colorIndex: 6,
+        id: `wharf-${tile.gx}-${tile.gz}`,
+        door: 'south',
+        enter: true,
+        sign: { text: 'FISH', bg: '#145a78', fg: '#e7fbff', w: 1.35 },
+      });
+    }
+    districtSign(tile, 'HARBOR', '#145a78', '#e7fbff');
+  }
+
+  function buildCarnival(tile, h) {
+    yard(tile, nightMat, 0.7, 0.06);
+    addStringLights(tile, GROUND_Y + 3.35);
+    const glow = new THREE.PointLight(0xff4ad4, 2.2, 18, 2);
+    glow.position.set(17, GROUND_Y + 4.4, 16);
+    tile.group.add(glow);
+    const pick = h % 3;
+    if (pick === 0) addWheel(tile, 16.6, 17);
+    else if (pick === 1) {
+      addTent(tile, 14.2, 16.6, neonPink);
+      addTent(tile, 20.6, 18.4, neonCyan);
+    } else {
+      addTent(tile, 14.6, 18.2, neonYellow);
+      addBooth(tile, 20.4, 14.8);
+    }
+    addBalloon(tile, 11.2, 12.2, neonPink);
+    addBalloon(tile, 23.2, 12.4, neonYellow);
+    addBalloon(tile, 22.2, 22.4, neonCyan);
+    districtSign(tile, 'CARNIVAL', '#2a1048', '#ff8ad4');
+  }
+
   function buildLot(tile, h) {
-    const kind = h % 10;
-    if (kind < 4) buildTower(tile, h);
-    else if (kind === 4) buildPark(tile);
-    else if (kind === 5) buildPlay(tile);
-    else if (kind === 6) buildSchool(tile);
-    else if (kind === 7) buildCafe(tile, h);
-    else if (kind === 8) buildPlaza(tile);
-    else buildShops(tile, h);
+    const district = districtId(tile.gx, tile.gz);
+    if (district === 'market') buildMarket(tile);
+    else if (district === 'harbor') buildHarbor(tile);
+    else if (district === 'carnival') buildCarnival(tile, h);
+    else buildMain(tile, h);
   }
 
   function yawOf(car) {
@@ -1919,6 +2348,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       honk: true,
       bawk: true,
       hit: true,
+      by: who,
       who,
       style: {
         spin: kind.spin,
@@ -2111,8 +2541,21 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.travel += dir * SPAN * CELL;
   }
 
-  function spawnCar(axis, slot, gx, gz, travel) {
-    const kind = pickKind();
+  function districtAt(x, z) {
+    const gx = clamp(Math.floor((x - shiftX) / CELL), 0, CITY - 1);
+    const gz = clamp(Math.floor((z - shiftZ) / CELL), 0, CITY - 1);
+    return districtId(gx, gz);
+  }
+
+  function noteDistrict(x, z) {
+    const id = districtAt(x, z);
+    if (!id || id === seenDistrict) return;
+    seenDistrict = id;
+    onEvent({ callout: DISTRICT_NAME[id] || id });
+  }
+
+  function spawnCar(axis, slot, gx, gz, travel, home) {
+    const kind = home ? fleetKind(home, (Math.abs(travel) * 10 + nextCarId) | 0) : pickKind();
     const sign = slot === 0 ? 1 : -1;
     const cruise = FLOW_SPEED;
     const speed = sign * cruise;
@@ -2128,7 +2571,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     body.addShape(new CANNON.Box(new CANNON.Vec3(kind.w / 2, kind.h / 2, kind.d / 2)));
     body.angularFactor.set(0, 0, 0);
     body.gameRole = 'car';
-    const mesh = buildCar(kind);
+    const mesh = buildCar(kind, home ? fleetPaint(home, kind) : null);
     carRoot.add(mesh);
     const car = {
       id: nextCarId++,
@@ -2137,6 +2580,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       gx,
       gz,
       travel,
+      home: home || '',
       dir: sign,
       cruise,
       speed,
@@ -2512,8 +2956,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           shake: 0.18,
           crunch: true,
           impact: 8,
-          score: 18,
-          pos: { x: (mine.x + box.x) / 2, y: car.ride + 0.5, z: (mine.z + box.z) / 2 },
+          score: car.pilot ? 18 : 0,
+          by: car.pilot || undefined,
+      pos: { x: (mine.x + box.x) / 2, y: car.ride + 0.5, z: (mine.z + box.z) / 2 },
           burst: 'chip',
         });
       }
@@ -3231,7 +3676,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
   }
 
-  function hitBar(bar, pos) {
+  function hitBar(bar, pos, hitter) {
     if (!jail || jail.breached || bar.gone) return;
     bar.hits += 1;
     bar.mesh.rotation.z += 0.08;
@@ -3252,6 +3697,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         callout: 'BARS!',
         shake: 0.16,
         score: 6,
+        by: hitter || undefined,
         impact: 7,
         pos,
         burst: 'chip',
@@ -3265,6 +3711,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       flair: 'BREAK OUT!',
       shake: 0.42,
       score: 50,
+      by: hitter || undefined,
       impact: 12,
       pos: { x: pos.x, y: pos.y + 0.4, z: pos.z },
       burst: 'chip',
@@ -3297,7 +3744,19 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           const bar = nearestBar(p.x, p.y, p.z, 1.25);
           if (bar) {
             item.cool = 0.28;
-            hitBar(bar, { x: p.x, y: p.y, z: p.z });
+            let hitter = mates[0];
+            let bestD = Infinity;
+            for (const doll of mates) {
+              const spot = doll.mover().position;
+              const dx = spot.x - p.x;
+              const dz = spot.z - p.z;
+              const d = dx * dx + dz * dz;
+              if (d < bestD) {
+                bestD = d;
+                hitter = doll;
+              }
+            }
+            hitBar(bar, { x: p.x, y: p.y, z: p.z }, hitter);
           }
         }
       }
@@ -3310,7 +3769,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       const bar = nearestBar(mover.position.x, mover.position.y, mover.position.z, 0.62);
       if (!bar) continue;
       jail.bash = 0.42;
-      hitBar(bar, { x: mover.position.x, y: mover.position.y, z: mover.position.z });
+      hitBar(bar, { x: mover.position.x, y: mover.position.y, z: mover.position.z }, doll);
       break;
     }
   }
@@ -3337,7 +3796,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const bar = nearestBar(mover.position.x, mover.position.y, mover.position.z, 1.35);
     if (!bar) return true;
     jail.bash = 0.3;
-    hitBar(bar, { x: mover.position.x, y: mover.position.y, z: mover.position.z });
+    hitBar(bar, { x: mover.position.x, y: mover.position.y, z: mover.position.z }, ragdoll);
     return true;
   }
 
@@ -4082,8 +4541,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function spawnLoopCar(slot, distance) {
-    const kind = pickKind();
     const pose = loopPose(distance, slot);
+    const home = districtAt(pose.x, pose.z);
+    const kind = fleetKind(home, (distance * 10) | 0);
     const body = new CANNON.Body({
       mass: 0,
       type: CANNON.Body.KINEMATIC,
@@ -4096,11 +4556,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     body.addShape(new CANNON.Box(new CANNON.Vec3(kind.w / 2, kind.h / 2, kind.d / 2)));
     body.angularFactor.set(0, 0, 0);
     body.gameRole = 'car';
-    const mesh = buildCar(kind);
+    const mesh = buildCar(kind, fleetPaint(home, kind));
     carRoot.add(mesh);
     const car = {
       id: nextCarId++,
       axis: 'loop',
+      home,
       slot,
       gx: 0,
       gz: 0,
@@ -4154,10 +4615,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   function spawnTraffic() {
     for (let i = 0; i < CITY; i++) {
       for (let n = 0; n < CITY - 1; n++) {
-        spawnCar('z', 0, i, 0, blockTravel('z', shiftZ, (i + n) % CITY));
-        spawnCar('z', 1, i, 0, blockTravel('z', shiftZ, (i + n + 2) % CITY));
-        spawnCar('x', 0, 0, i, blockTravel('x', shiftX, (i + n + 1) % CITY));
-        spawnCar('x', 1, 0, i, blockTravel('x', shiftX, (i + n + 3) % CITY));
+        const zSouth = (i + n) % CITY;
+        const zNorth = (i + n + 2) % CITY;
+        const xEast = (i + n + 1) % CITY;
+        const xFar = (i + n + 3) % CITY;
+        spawnCar('z', 0, i, 0, blockTravel('z', shiftZ, zSouth), districtId(i, zSouth));
+        spawnCar('z', 1, i, 0, blockTravel('z', shiftZ, zNorth), districtId(i, zNorth));
+        spawnCar('x', 0, 0, i, blockTravel('x', shiftX, xEast), districtId(xEast, i));
+        spawnCar('x', 1, 0, i, blockTravel('x', shiftX, xFar), districtId(xFar, i));
       }
     }
     holdLanes();
@@ -4660,6 +5125,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (indoors.has(doll) || pilotOf(doll)) continue;
       const body = doll.walking() ? doll.mover() : doll.torso.body;
       if (!body || body.position.y > water) continue;
+      const wetDistrict = districtAt(body.position.x, body.position.z);
       const spot = islandClamp(body.position.x, body.position.z, 2.4);
       if (doll.walking()) {
         const walker = doll.mover();
@@ -4687,6 +5153,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         shake: 0.16,
         pos: { x: spot.x, y: GROUND_Y + 1.2, z: spot.z },
         burst: 'chip',
+        who: doll,
+        unlock: wetDistrict === 'harbor' && doll === ragdoll ? 'overboard' : '',
       });
     }
   }
@@ -4738,6 +5206,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
     junk.length = 0;
     junkRoot.clear();
+    waveQueue.length = 0;
+    waveReadyAt = 0;
     weapons.clear();
     destroyDistrict();
     if (ground) removeBody(ground);
@@ -4745,6 +5215,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     shiftX = 0;
     shiftZ = 0;
     hits = 0;
+    seenDistrict = '';
+    tallies.meter = 0;
+    tallies.cart = 0;
+    tallies.balloon = 0;
     stillTime = 0;
     campSet = false;
     prey.still = false;
@@ -4787,6 +5261,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
     buildDistrict();
     spawnTraffic();
+    seenDistrict = 'main';
     prepareJail();
     const spawn = {
       x: ROAD + WALK * 0.5,
@@ -4937,8 +5412,11 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function trimJunk() {
+    const fresh = performance.now() - 8000;
     while (junk.length > JUNK_CAP) {
-      let index = junk.findIndex((item) => !item.roadkill);
+      let index = junk.findIndex((item) => !item.roadkill && !item.prize);
+      if (index < 0) index = junk.findIndex((item) => item.prize && item.born < fresh);
+      if (index < 0) index = junk.findIndex((item) => !item.roadkill);
       if (index < 0) index = 0;
       const old = junk.splice(index, 1)[0];
       removeBody(old.body);
@@ -5009,13 +5487,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const loop = car.loop;
     const along = car.s;
     const roam = car.roam;
+    const home = car.home;
     removeCar(car);
     if (car.rogue) return;
     if (loop) {
       reviveLoop(slot, along, roam);
       return;
     }
-    spawnCar(axis, slot, gx, gz, respawnTravel(axis, slot, travel));
+    spawnCar(axis, slot, gx, gz, respawnTravel(axis, slot, travel), home);
   }
 
   const WRECK = GROUP_PROP | 8;
@@ -5037,6 +5516,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const along = car.s;
     const roam = car.roam;
     const travel = (axis === 'z' ? p.z : p.x) + car.dir * CELL * 2.4;
+    const home = car.home;
     const quat = car.body.quaternion;
     removeBody(car.body);
     const index = cars.indexOf(car);
@@ -5060,7 +5540,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     body.angularVelocity.set(grip.dz * 4 * power.spin, rand(-2, 2), -grip.dx * 4 * power.spin);
     body.wakeUp();
     addBody(body);
-    junk.push({ body, mesh, roadkill: true, yeet: true, pad: Math.max(kind.w, kind.d) * 0.5 });
+    junk.push({ body, mesh, roadkill: true, yeet: true, car: true, pad: Math.max(kind.w, kind.d) * 0.5 });
     trimJunk();
     onEvent({
       callout: power.callout,
@@ -5072,7 +5552,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       burst: power.burst || 'launch',
     });
     if (!rogue && loop) reviveLoop(slot, along, roam);
-    else if (!rogue) spawnCar(axis, slot, gx, gz, respawnTravel(axis, slot, travel));
+    else if (!rogue) spawnCar(axis, slot, gx, gz, respawnTravel(axis, slot, travel), home);
   }
 
   function spawnChunk(x, y, z, color, sx, sy, sz, vx, vy, vz) {
@@ -5231,6 +5711,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       pos: { x: hit.x, y: prop.ly + prop.hy, z: hit.z },
       burst: 'chip',
     });
+    queueToyWave(hit.x, hit.z);
     const crew = [];
     if (prop.crew) {
       for (const doll of prop.crew) {
@@ -5363,6 +5844,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     addBody(body);
     junk.push({ body, mesh: group, roadkill: true, yeet: lift > 2 || knock > 2, pad: prop.pad || 1.2 });
     trimJunk();
+    let unlockId = '';
+    if (prop.mark) {
+      tallies[prop.mark] = (tallies[prop.mark] || 0) + 1;
+      const goals = { meter: 4, cart: 6, balloon: 5 };
+      if (tallies[prop.mark] === goals[prop.mark]) unlockId = prop.mark;
+    }
     onEvent({
       callout: prop.yell,
       flair: prop.yell,
@@ -5371,6 +5858,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       impact: 9,
       pos: { x: worldPos.x, y: worldPos.y + 0.8, z: worldPos.z },
       burst: power.burst === 'zap' ? 'zap' : power.burst === 'launch' ? 'launch' : 'chip',
+      unlock: unlockId,
     });
   }
 
@@ -5498,6 +5986,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function swingAt(attacker) {
+    const previousCredit = creditDoll;
+    creditDoll = attacker;
+    try {
     const key = armKey(attacker);
     const power = weapons.stats(key);
     const hand = handOf(attacker);
@@ -5507,6 +5998,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     const doomed = [];
     const struck = [];
     const bruised = [];
+    const tossed = [];
 
     for (const car of cars) {
       if (weapons.seen(car.id, key)) continue;
@@ -5569,6 +6061,23 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         weapons.mark(prop.id, key);
         struck.push({ tile, prop, ...hit });
       }
+    }
+    for (const item of junk) {
+      if (!item.prize || weapons.seen(item.id, key)) continue;
+      let hit = false;
+      for (const ray of rays) {
+        for (let t = 0.12; t <= 1; t += 0.12) {
+          const dist = power.reach * t;
+          if (prizeTouch(item, ray.x + ray.dx * dist, ray.y + ray.dy * dist, ray.z + ray.dz * dist)) {
+            hit = true;
+            break;
+          }
+        }
+        if (hit) break;
+      }
+      if (!hit) continue;
+      weapons.mark(item.id, key);
+      tossed.push(item);
     }
     if (jail && !jail.open && grip && haulOf(attacker)?.phase === 'cell') {
       const aim = { x: grip.dx, y: grip.dy, z: grip.dz };
@@ -5638,6 +6147,16 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
             weapons.mark(prop.id, key);
             struck.push({ tile, prop, x: at.x, y: at.y, z: at.z });
           }
+        }
+        for (const item of junk) {
+          if (!item.prize || weapons.seen(item.id, key)) continue;
+          const p = item.body.position;
+          const dx = p.x - origin.x;
+          const dy = p.y - origin.y;
+          const dz = p.z - origin.z;
+          if (dx * dx + dy * dy + dz * dz > r2) continue;
+          weapons.mark(item.id, key);
+          tossed.push(item);
         }
         if (jail && !jail.open && haulOf(attacker)?.phase === 'cell') shoveLoose(origin.x, origin.y, origin.z, null, power, power.blast, key);
       }
@@ -5724,6 +6243,233 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       else topple(blow.tile, blow.prop, grip, power);
     }
     for (const blow of bruised) launchBird(blow.doll, grip, power, blow.part);
+    for (const item of tossed) yeetPrize(item, grip, power);
+    } finally {
+      creditDoll = previousCredit;
+    }
+  }
+
+  function prizeTouch(item, x, y, z) {
+    const p = item.body.position;
+    const pad = item.pad || 0.6;
+    const dx = x - p.x;
+    const dy = y - (p.y + (item.mid || 0.35));
+    const dz = z - p.z;
+    return dx * dx + dy * dy + dz * dz < pad * pad;
+  }
+
+  function yeetPrize(item, grip, power) {
+    const knock = power.knock || 1;
+    const lift = power.lift || 1;
+    const spin = power.spin || 1;
+    item.yeet = true;
+    item.body.velocity.set(grip.dx * 12 * knock, 4.2 * lift + 1.5, grip.dz * 12 * knock);
+    item.body.angularVelocity.set(grip.dz * 4.5 * spin, rand(-2, 2), -grip.dx * 4.5 * spin);
+    item.body.wakeUp();
+    item.bonkAt = performance.now() + 500;
+    const p = item.body.position;
+    onEvent({
+      callout: item.yell,
+      flair: item.yell,
+      shake: (item.toy === 'float' ? 0.32 : 0.1) * (power.shake || 1),
+      score: item.score * (power.score || 1),
+      impact: item.toy === 'float' ? 12 : 6,
+      pos: { x: p.x, y: p.y + (item.mid || 0.6), z: p.z },
+      burst: item.toy === 'float' ? 'launch' : 'toys',
+    });
+  }
+
+  function spawnPrize(kind, x, y, z, extra = {}) {
+    const scale = extra.scale || 1;
+    const body = new CANNON.Body({
+      mass: extra.mass,
+      material: toyMat,
+      linearDamping: kind === 'float' ? 0.12 : 0.08,
+      angularDamping: kind === 'float' ? 0.18 : 0.12,
+      allowSleep: true,
+      collisionFilterGroup: GROUP_PROP,
+      collisionFilterMask: GROUP_RAG | GROUP_PROP | GROUP_STATIC,
+    });
+    let mesh;
+    if (kind === 'duck') {
+      mesh = art.duckMesh();
+      mesh.scale.setScalar(scale);
+      body.addShape(new CANNON.Sphere(0.42 * scale), new CANNON.Vec3(0, 0.16 * scale, 0));
+      body.addShape(new CANNON.Sphere(0.22 * scale), new CANNON.Vec3(0, 0.48 * scale, 0.28 * scale));
+    } else if (kind === 'pin') {
+      mesh = art.pinMesh();
+      body.addShape(new CANNON.Cylinder(0.1, 0.16, 0.78, 8), new CANNON.Vec3(0, 0.39, 0));
+    } else if (kind === 'ball') {
+      mesh = art.ballMesh();
+      body.addShape(new CANNON.Sphere(0.34));
+    } else {
+      mesh = art.floatMesh();
+      mesh.scale.setScalar(scale);
+      body.addShape(new CANNON.Box(new CANNON.Vec3(1.7 * scale, 0.16 * scale, 0.85 * scale)), new CANNON.Vec3(0, 0.28 * scale, 0));
+      body.addShape(new CANNON.Box(new CANNON.Vec3(0.36 * scale, 0.35 * scale, 0.58 * scale)), new CANNON.Vec3(-1.15 * scale, 0.82 * scale, 0));
+      body.addShape(new CANNON.Sphere(0.48 * scale), new CANNON.Vec3(0.15 * scale, 1.2 * scale, 0));
+    }
+    body.position.set(x, y, z);
+    if (extra.yaw) body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), extra.yaw);
+    body.velocity.set(extra.vx || 0, extra.vy == null ? rand(-0.4, 1.2) : extra.vy, extra.vz || 0);
+    body.angularVelocity.set(rand(-2.4, 2.4), rand(-2, 2), rand(-2.4, 2.4));
+    body.gameRole = 'prop';
+    addBody(body);
+    junkRoot.add(mesh);
+    const item = {
+      id: `prize-${nextPrizeId++}`,
+      body,
+      mesh,
+      rubble: true,
+      prize: true,
+      toy: kind,
+      yell: extra.yell,
+      score: extra.score,
+      pad: extra.pad,
+      mid: extra.mid,
+      born: performance.now(),
+    };
+    junk.push(item);
+    body.addEventListener('collide', (e) => {
+      const other = e.body;
+      if (!other || other.gameRole !== 'ragdoll') return;
+      const impact = Math.abs(e.contact.getImpactVelocityAlongNormal());
+      if (!Number.isFinite(impact) || impact < 3.4) return;
+      const now = performance.now();
+      if (now < (item.bonkAt || 0)) return;
+      item.bonkAt = now + 460;
+      const at = body.position;
+      onEvent({
+        callout: item.yell,
+        flair: item.yell,
+        shake: item.toy === 'float' ? 0.18 : 0.06,
+        score: Math.round(item.score * 0.6),
+        impact: Math.min(14, impact),
+        pos: { x: at.x, y: at.y + (item.mid || 0.5), z: at.z },
+        burst: 'toys',
+      });
+    });
+    trimJunk();
+    return item;
+  }
+
+  function cluster(body, cx, cz) {
+    const p = body.position;
+    body.velocity.x += (cx - p.x) * 0.35;
+    body.velocity.z += (cz - p.z) * 0.35;
+  }
+
+  function inRoomAt(x, z) {
+    return !!(room && Math.abs(x - ROOM_OX) < ROOM_W / 2 - 0.6 && Math.abs(z - ROOM_OZ) < ROOM_D / 2 - 0.6);
+  }
+
+  function dropRoomWave(x, z, theme) {
+    const lx = x - ROOM_OX;
+    const lz = z - ROOM_OZ;
+    const y0 = GROUND_Y + 3.35;
+    if (theme === 'ducks') {
+      for (let i = 0; i < 5; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 0.35 + Math.random() * 1.5;
+        spawnRoomToy('duck', lx + Math.cos(angle) * radius, y0 + i * 0.28, lz + Math.sin(angle) * radius, 'QUACK!');
+      }
+    } else if (theme === 'pins') {
+      for (let row = 0; row < 4; row++) {
+        for (let c = 0; c <= row; c++) {
+          spawnRoomToy('pin', lx + (c - row / 2) * 0.4, y0 + 0.2, lz - 0.4 + row * 0.38, 'CLACK!');
+        }
+      }
+    } else {
+      spawnRoomToy('float', lx, y0, lz, 'PARADE!');
+    }
+    onEvent({
+      callout: WAVE_LABEL[theme],
+      pos: { x, y: y0, z },
+      burst: 'toys',
+      shake: 0.16,
+    });
+  }
+
+  function releaseToyWave(x, z) {
+    const theme = WAVE_THEMES[waveCursor % WAVE_THEMES.length];
+    waveCursor += 1;
+    if (inRoomAt(x, z)) {
+      dropRoomWave(x, z, theme);
+      return;
+    }
+    const sky = GROUND_Y + 18 + Math.random() * 6;
+    if (theme === 'ducks') {
+      for (let i = 0; i < 7; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = 0.4 + Math.random() * 2.2;
+        const scale = i === 0 ? 1.7 : 0.9 + Math.random() * 0.4;
+        const item = spawnPrize('duck', x + Math.cos(angle) * radius, sky + i * 0.45, z + Math.sin(angle) * radius, {
+          scale,
+          mass: 1.2 * scale,
+          yell: 'QUACK!',
+          score: 8,
+          pad: 0.7 * scale,
+          mid: 0.4 * scale,
+          yaw: Math.random() * Math.PI * 2,
+        });
+        cluster(item.body, x, z);
+      }
+    } else if (theme === 'pins') {
+      for (let row = 0; row < 4; row++) {
+        for (let c = 0; c <= row; c++) {
+          const item = spawnPrize('pin', x + (c - row / 2) * 0.46, sky + 0.6, z - 0.6 + row * 0.46, {
+            mass: 0.45,
+            yell: 'CLACK!',
+            score: 4,
+            pad: 0.42,
+            mid: 0.4,
+          });
+          cluster(item.body, x, z);
+        }
+      }
+      spawnPrize('ball', x, sky + 3.6, z - 2.3, {
+        mass: 3.1,
+        yell: 'BOWL!',
+        score: 8,
+        pad: 0.5,
+        mid: 0.34,
+        vy: -0.2,
+        vz: 3.2,
+      });
+    } else {
+      spawnPrize('float', x, sky + 1.5, z, {
+        mass: 7.2,
+        yell: 'PARADE!',
+        score: 28,
+        pad: 2.15,
+        mid: 0.7,
+        yaw: Math.random() * Math.PI * 2,
+        vy: 0.4,
+      });
+    }
+    onEvent({
+      callout: WAVE_LABEL[theme],
+      pos: { x, y: sky, z },
+      burst: 'toys',
+      shake: theme === 'float' ? 0.2 : 0.12,
+    });
+  }
+
+  function queueToyWave(x, z) {
+    if (!running || mirror) return;
+    const now = performance.now();
+    if (now < waveReadyAt) return;
+    waveReadyAt = now + 1600;
+    waveQueue.push({ x, z, t: 0.65 });
+  }
+
+  function pumpWaves(dt) {
+    for (let i = waveQueue.length - 1; i >= 0; i--) {
+      waveQueue[i].t -= dt;
+      if (waveQueue[i].t > 0) continue;
+      const job = waveQueue.splice(i, 1)[0];
+      releaseToyWave(job.x, job.z);
+    }
   }
 
   function spawnJunk(x, z) {
@@ -5976,6 +6722,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       const beak = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.08, 0.22), art.plastic(0xff922b, { roughness: 0.45 }));
       beak.position.set(0, 0.32, 0.52);
       mesh.add(belly, head, beak);
+    } else if (kind === 'float') {
+      mass = 4.6;
+      mesh = art.floatMesh();
+      mesh.scale.setScalar(0.62);
     } else {
       mass = 1.05;
       shape = new CANNON.Box(new CANNON.Vec3(0.34, 0.34, 0.34));
@@ -5992,7 +6742,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       collisionFilterGroup: GROUP_PROP,
       collisionFilterMask: GROUP_RAG | GROUP_PROP | GROUP_STATIC,
     });
-    body.addShape(shape);
+    if (kind === 'float') {
+      const s = 0.62;
+      body.addShape(new CANNON.Box(new CANNON.Vec3(1.7 * s, 0.16 * s, 0.85 * s)), new CANNON.Vec3(0, 0.28 * s, 0));
+      body.addShape(new CANNON.Box(new CANNON.Vec3(0.36 * s, 0.35 * s, 0.58 * s)), new CANNON.Vec3(-1.15 * s, 0.82 * s, 0));
+      body.addShape(new CANNON.Sphere(0.42 * s), new CANNON.Vec3(0.15 * s, 1.2 * s, 0));
+    } else body.addShape(shape);
     body.position.set(ROOM_OX + x, y, ROOM_OZ + z);
     body.gameRole = 'prop';
     addBody(body);
@@ -6003,7 +6758,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
     });
     room.root.add(mesh);
-    const toy = { body, mesh, yell: yell || 'BONK!' };
+    const toy = { body, mesh, yell: yell || 'BONK!', kind };
     room.toys.push(toy);
     body.addEventListener('collide', (e) => onToyHit(body, toy, e));
     return toy;
@@ -6406,18 +7161,26 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       carGhosts.delete(id);
     }
   }
+  function prizeGhost(kind, color) {
+    if (kind === 'duck') return art.duckMesh();
+    if (kind === 'pin') return art.pinMesh();
+    if (kind === 'ball') return art.ballMesh();
+    if (kind === 'float') return art.floatMesh();
+    const mesh = new THREE.Mesh(box, paintOf(color || 0xffd84a));
+    mesh.castShadow = true;
+    return mesh;
+  }
   function applyJunk(list, hard, stamp) {
     const seen = new Set();
     for (const row of list || []) {
-      const [id, x, y, z, qx, qy, qz, qw, sx, sy, sz, color] = row;
+      const [id, x, y, z, qx, qy, qz, qw, sx, sy, sz, color, kind] = row;
       seen.add(id);
       let ghost = junkGhosts.get(id);
       if (!ghost) {
-        const mesh = new THREE.Mesh(box, paintOf(color || 0xffd84a));
-        mesh.castShadow = true;
+        const mesh = prizeGhost(kind, color);
         ghost = freshGhost(mesh);
         junkGhosts.set(id, ghost);
-      } else if (ghost.mesh.material.color.getHex() !== color) {
+      } else if (!kind && ghost.mesh.isMesh && ghost.mesh.material.color.getHex() !== color) {
         ghost.mesh.material = paintOf(color || 0xffd84a);
       }
       if (hard) {
@@ -6475,9 +7238,55 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
   }
 
+  function roofMeters(doll) {
+    if (!doll || !running || indoors.has(doll) || pilotOf(doll)) return 0;
+    const body = doll.walking() ? doll.mover() : doll.torso.body;
+    if (!body || Math.abs(body.velocity.y) > 3.2) return 0;
+    const feet = doll.walking() ? body.position.y - 0.95 : body.position.y - 0.4;
+    if (feet < GROUND_Y + 2.4) return 0;
+    const x = body.position.x;
+    const z = body.position.z;
+    let best = 0;
+    for (const tile of tiles) {
+      const ox = shiftX + tile.gx * CELL;
+      const oz = shiftZ + tile.gz * CELL;
+      for (const prop of tile.props || []) {
+        if (prop.kind !== 'building') continue;
+        const top = prop.ly + prop.hy;
+        if (feet < top - 0.45 || feet > top + 1.8) continue;
+        const minX = ox + prop.lx - prop.hx - 0.35;
+        const maxX = ox + prop.lx + prop.hx + 0.35;
+        const minZ = oz + prop.lz - prop.hz - 0.35;
+        const maxZ = oz + prop.lz + prop.hz + 0.35;
+        if (x < minX || x > maxX || z < minZ || z > maxZ) continue;
+        const meters = top - GROUND_Y;
+        if (meters > best) best = meters;
+      }
+    }
+    return best;
+  }
+
+  function carsAloft() {
+    let n = 0;
+    for (const item of junk) {
+      if (!item.car || !item.body) continue;
+      const y = item.body.position.y;
+      const vy = item.body.velocity.y;
+      if (y > GROUND_Y + 4 || (y > GROUND_Y + 2.4 && Math.abs(vy) > 0.45)) n += 1;
+    }
+    return n;
+  }
+
   return {
     active: () => running,
     hits: () => hits,
+    roofMeters,
+    carsAloft,
+    holding: (doll) => weapons.kindIndex(armKey(doll || ragdoll)) >= 0,
+    driveSpeed(doll) {
+      const car = pilotOf(doll || ragdoll);
+      return car ? Math.abs(car.speed) : 0;
+    },
     walkerMaterial: () => walkMat,
     weaponLabel: () => weapons.label(),
     weaponName: (index) => weapons.labelAt(index),
@@ -6668,6 +7477,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       return null;
     },
+    queueToyWave,
     dumpToys(pos) {
       if (!running) return;
       const lx = pos.x - ROOM_OX;
@@ -6706,6 +7516,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     },
     prePhysics(dt) {
       if (!running) return;
+      pumpWaves(dt);
       for (const car of cars) {
         if (car.driven) {
           roll(car, dt, car.gas || 0, car.wheel || 0, false);
@@ -6779,6 +7590,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (indoors.has(ragdoll)) refillWeapons(prey.x, prey.z);
       else refillWeapons(torso.position.x, torso.position.z);
       const actor = ragdoll.walking() ? ragdoll.mover() : torso;
+      if (!indoors.has(ragdoll)) noteDistrict(actor.position.x, actor.position.z);
       const airborne = !ragdoll.walking() && (Math.abs(torso.velocity.y) > 2.4 || torso.position.y > GROUND_Y + 2.4);
       const hunting = rogueAlive();
       if (indoors.has(ragdoll)) {
@@ -7065,6 +7877,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
             round2(item.mesh.scale.y || 1),
             round2(item.mesh.scale.z || 1),
             meshColor(item.mesh),
+            item.toy || '',
           ];
         }),
         drops: weapons.layout(),

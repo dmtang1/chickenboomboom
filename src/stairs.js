@@ -127,6 +127,9 @@ export function createStairs({ world, scene, art, ragdoll, toyMat, rubberMat, bo
   let openingPose = null;
   let stuckTime = 0;
   let layout = 'spiral';
+  const WAVE_THEMES = ['ducks', 'pins', 'float'];
+  const WAVE_LABEL = { ducks: 'DUCKS!', pins: 'PINS!', float: 'PARADE!' };
+  let waveCursor = 0;
   let runX = 0;
   let snagUntil = 0;
   let stall = 0;
@@ -1105,6 +1108,104 @@ export function createStairs({ world, scene, art, ragdoll, toyMat, rubberMat, bo
     return { x: b.x, y: b.y + best.top + 1.36, z: b.z, vx: 0, vy: 0.4, vz: 0 };
   }
 
+  function addPrize(kind, x, y, z, extra = {}) {
+    const scale = extra.scale || 1;
+    const mesh = kind === 'duck'
+      ? art.duckMesh()
+      : kind === 'pin'
+        ? art.pinMesh()
+        : kind === 'ball'
+          ? art.ballMesh()
+          : art.floatMesh();
+    mesh.scale.setScalar(scale);
+    const body = new CANNON.Body({
+      mass: extra.mass,
+      position: new CANNON.Vec3(x, y, z),
+      material: kind === 'duck' || kind === 'ball' ? rubberMat : toyMat,
+      linearDamping: 0.06,
+      angularDamping: 0.1,
+      collisionFilterGroup: GROUP_PROP,
+      collisionFilterMask: GROUP_RAG | GROUP_PROP | GROUP_STATIC,
+    });
+    if (kind === 'duck') {
+      body.addShape(new CANNON.Sphere(0.42 * scale), new CANNON.Vec3(0, 0.16 * scale, 0));
+      body.addShape(new CANNON.Sphere(0.22 * scale), new CANNON.Vec3(0, 0.48 * scale, 0.28 * scale));
+    } else if (kind === 'pin') {
+      body.addShape(new CANNON.Cylinder(0.1 * scale, 0.16 * scale, 0.78 * scale, 8), new CANNON.Vec3(0, 0.39 * scale, 0));
+    } else if (kind === 'ball') {
+      body.addShape(new CANNON.Sphere(0.34 * scale));
+    } else {
+      body.addShape(new CANNON.Box(new CANNON.Vec3(1.7 * scale, 0.16 * scale, 0.85 * scale)), new CANNON.Vec3(0, 0.28 * scale, 0));
+      body.addShape(new CANNON.Box(new CANNON.Vec3(0.36 * scale, 0.35 * scale, 0.58 * scale)), new CANNON.Vec3(-1.15 * scale, 0.82 * scale, 0));
+      body.addShape(new CANNON.Sphere(0.48 * scale), new CANNON.Vec3(0.15 * scale, 1.2 * scale, 0));
+    }
+    body.velocity.set(extra.vx || rand(-0.6, 0.6), extra.vy == null ? rand(-0.4, 0.8) : extra.vy, extra.vz || rand(-0.6, 0.6));
+    body.angularVelocity.set(rand(-2, 2), rand(-2, 2), rand(-2, 2));
+    body.gameRole = 'prop';
+    world.addBody(body);
+    return track({
+      kind,
+      body,
+      mesh,
+      prize: true,
+      scoreHits: true,
+      minImpact: 2.2,
+      flair: extra.flair,
+      ttl: 16,
+    });
+  }
+
+  function dropWave(pos) {
+    if (!running) return '';
+    let prizes = 0;
+    for (const ent of ents) if (ent.prize) prizes += 1;
+    if (prizes > 22) return '';
+    const theme = WAVE_THEMES[waveCursor % WAVE_THEMES.length];
+    waveCursor += 1;
+    const sky = pos.y + 8 + Math.random() * 3;
+    const span = layout === 'straight' ? 1 : 0.55;
+    if (theme === 'ducks') {
+      for (let i = 0; i < 5; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const radius = Math.random() * span;
+        addPrize('duck', pos.x + Math.cos(angle) * radius, sky + i * 0.4, pos.z + Math.sin(angle) * radius, {
+          scale: i === 0 ? 1.15 : 0.75,
+          mass: i === 0 ? 1.3 : 0.8,
+          flair: 'QUACK!',
+        });
+      }
+    } else if (theme === 'pins') {
+      for (let row = 0; row < 4; row++) {
+        for (let c = 0; c <= row; c++) {
+          addPrize('pin', pos.x + (c - row / 2) * 0.36, sky, pos.z + row * 0.34, {
+            scale: 0.85,
+            mass: 0.4,
+            flair: 'CLACK!',
+          });
+        }
+      }
+      addPrize('ball', pos.x, sky + 2.4, pos.z - 1.2, {
+        mass: 2.2,
+        flair: 'BOWL!',
+        vz: 2.4,
+        vy: -0.2,
+      });
+    } else {
+      addPrize('float', pos.x, sky + 1.2, pos.z, {
+        scale: layout === 'straight' ? 0.62 : 0.42,
+        mass: layout === 'straight' ? 4.2 : 2.6,
+        flair: 'PARADE!',
+        vy: 0.2,
+      });
+    }
+    onEvent({
+      callout: WAVE_LABEL[theme],
+      pos: { x: pos.x, y: pos.y + 2, z: pos.z },
+      burst: 'toys',
+    });
+    return WAVE_LABEL[theme];
+  }
+
   function dumpToys(pos) {
     for (let i = 0; i < 7; i++) {
       const a = Math.random() * Math.PI * 2;
@@ -1126,6 +1227,7 @@ export function createStairs({ world, scene, art, ragdoll, toyMat, rubberMat, bo
     clear,
     rescue,
     dumpToys,
+    dropWave,
     hop(torso) {
       if (!running || !torso) return false;
       const now = performance.now();

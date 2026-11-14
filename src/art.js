@@ -140,6 +140,105 @@ export function createArt(renderer) {
 
   const foamColors = [0xff5d73, 0xffd93d, 0x6bcb77, 0x4d96ff, 0xff922b, 0xc77dff, 0x4ecdc4, 0xfff3bf];
   const foamMats = foamColors.map((c) => plastic(c, { roughness: 0.48 }));
+  const unitBox = new THREE.BoxGeometry(1, 1, 1);
+  const duckBellyGeo = new THREE.SphereGeometry(0.46, 14, 10);
+  const duckHeadGeo = new THREE.SphereGeometry(0.26, 12, 10);
+  const beakGeo = new THREE.BoxGeometry(0.13, 0.08, 0.26);
+  const eyeGeo = new THREE.SphereGeometry(0.045, 8, 8);
+  const pupilGeo = new THREE.SphereGeometry(0.02, 8, 8);
+  const pinGeo = new THREE.CylinderGeometry(0.1, 0.16, 0.78, 10);
+  const pinBandGeo = new THREE.TorusGeometry(0.115, 0.03, 6, 12);
+  const balloonGeo = new THREE.SphereGeometry(0.48, 14, 12);
+  const wheelGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.18, 10);
+  const ballGeo = new THREE.SphereGeometry(0.34, 14, 12);
+  const poleGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.95, 6);
+  const yellow = plastic(0xffe14a, { roughness: 0.34 });
+  const orange = plastic(0xff922b, { roughness: 0.42 });
+  const pinWhite = plastic(0xfff6ea, { roughness: 0.36 });
+  const pinRed = plastic(0xff3355, { roughness: 0.4 });
+  const deckMat = plastic(0xfff3bf, { roughness: 0.42 });
+  const skirtMat = plastic(0xff5d73, { roughness: 0.4 });
+  const cabMat = plastic(0x4d96ff, { roughness: 0.4 });
+  const wheelMat = plastic(0x2b2f38, { roughness: 0.62 });
+  const ballMat = plastic(0x1c1f27, { roughness: 0.34 });
+  const eyeWhite = new THREE.MeshBasicMaterial({ color: 0xfffdfb });
+  const eyeBlack = new THREE.MeshBasicMaterial({ color: 0x1b1b1b });
+
+  function shade(mesh) {
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    return mesh;
+  }
+
+  function duckMesh() {
+    const mesh = new THREE.Group();
+    const belly = shade(new THREE.Mesh(duckBellyGeo, yellow));
+    belly.scale.set(1.12, 0.78, 1.02);
+    belly.position.y = 0.16;
+    const head = shade(new THREE.Mesh(duckHeadGeo, yellow));
+    head.position.set(0, 0.48, 0.3);
+    const beak = shade(new THREE.Mesh(beakGeo, orange));
+    beak.position.set(0, 0.46, 0.54);
+    for (const side of [-1, 1]) {
+      const eye = shade(new THREE.Mesh(eyeGeo, eyeWhite));
+      eye.position.set(side * 0.1, 0.54, 0.46);
+      const pupil = new THREE.Mesh(pupilGeo, eyeBlack);
+      pupil.position.z = 0.03;
+      eye.add(pupil);
+      mesh.add(eye);
+    }
+    mesh.add(belly, head, beak);
+    return mesh;
+  }
+
+  function pinMesh() {
+    const mesh = new THREE.Group();
+    const body = shade(new THREE.Mesh(pinGeo, pinWhite));
+    body.position.y = 0.39;
+    const band = shade(new THREE.Mesh(pinBandGeo, pinRed));
+    band.rotation.x = Math.PI / 2;
+    band.position.y = 0.52;
+    mesh.add(body, band);
+    return mesh;
+  }
+
+  function ballMesh() {
+    return shade(new THREE.Mesh(ballGeo, ballMat));
+  }
+
+  function floatMesh() {
+    const mesh = new THREE.Group();
+    const skirt = shade(new THREE.Mesh(unitBox, skirtMat));
+    skirt.scale.set(3.55, 0.22, 1.86);
+    skirt.position.y = 0.12;
+    const deck = shade(new THREE.Mesh(unitBox, deckMat));
+    deck.scale.set(3.35, 0.28, 1.68);
+    deck.position.y = 0.32;
+    const stripe = shade(new THREE.Mesh(unitBox, cabMat));
+    stripe.scale.set(3.35, 0.08, 1.68);
+    stripe.position.y = 0.48;
+    const cab = shade(new THREE.Mesh(unitBox, cabMat));
+    cab.scale.set(0.72, 0.7, 1.15);
+    cab.position.set(-1.15, 0.82, 0);
+    const balloon = shade(new THREE.Mesh(balloonGeo, yellow));
+    balloon.position.set(0.15, 1.2, 0);
+    const rider = duckMesh();
+    rider.scale.setScalar(0.72);
+    rider.position.set(0.95, 0.5, 0);
+    const pole = shade(new THREE.Mesh(poleGeo, wheelMat));
+    pole.position.set(1.45, 1.05, 0);
+    const flag = shade(new THREE.Mesh(unitBox, skirtMat));
+    flag.scale.set(0.02, 0.32, 0.55);
+    flag.position.set(1.45, 1.42, 0.22);
+    for (const [x, z] of [[-1.2, 0.78], [-1.2, -0.78], [1.15, 0.78], [1.15, -0.78]]) {
+      const wheel = shade(new THREE.Mesh(wheelGeo, wheelMat));
+      wheel.rotation.x = Math.PI / 2;
+      wheel.position.set(x, 0.24, z);
+      mesh.add(wheel);
+    }
+    mesh.add(skirt, deck, stripe, cab, balloon, rider, pole, flag);
+    return mesh;
+  }
 
   return {
     envMap,
@@ -156,5 +255,9 @@ export function createArt(renderer) {
     beakMat: plastic(0xff7a18, { roughness: 0.4 }),
     pinMat: plastic(0xfffaf2, { roughness: 0.32 }),
     pinBand: plastic(0xff3355, { roughness: 0.35 }),
+    duckMesh,
+    pinMesh,
+    ballMesh,
+    floatMesh,
   };
 }

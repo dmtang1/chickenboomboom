@@ -48,10 +48,22 @@ html, body {
 
 [hidden] { display: none !important; }
 
-#logo {
+#corner {
   position: absolute;
   top: 16px;
   left: 18px;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: min(320px, calc(100vw - 88px));
+  pointer-events: none;
+}
+
+#corner button { pointer-events: auto; }
+
+#logo {
   font-weight: 700;
   font-size: 22px;
   letter-spacing: 0.04em;
@@ -67,18 +79,14 @@ html, body {
 }
 
 #scoreboard {
-  position: absolute;
-  top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  text-align: center;
-  min-width: 160px;
+  text-align: left;
+  min-width: 0;
 }
 
 #score-row {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
 }
 
@@ -125,6 +133,107 @@ html, body {
   text-shadow: 0 2px 0 var(--ink);
   opacity: 0.85;
 }
+
+#bests {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+#bests-toggle {
+  padding: 2px 9px;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  border-width: 2px;
+  border-radius: 999px;
+  box-shadow: 0 2px 0 var(--ink);
+}
+
+#bests-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px 8px;
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 1px 12px;
+  width: max-content;
+  background: rgba(16, 24, 36, 0.38);
+  border-radius: 10px;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-shadow: 0 2px 0 #1b1b1b;
+}
+
+#bests-list li {
+  display: flex;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+#bests-list b {
+  font-weight: 700;
+  opacity: 0.8;
+}
+
+#bests.is-hidden #bests-list { display: none; }
+
+#ranks {
+  width: 168px;
+  max-height: 168px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 12px;
+  background: rgba(16, 24, 36, 0.5);
+  color: white;
+  pointer-events: none;
+}
+
+#ranks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-shadow: 0 2px 0 #1b1b1b;
+}
+
+#ranks-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+#ranks-list li span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#ranks-list i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 1px solid white;
+  flex: none;
+}
+
+#ranks-list .me { color: var(--sun); }
+
+#btn-ranks { letter-spacing: 0.06em; }
+
+#btn-ranks[aria-pressed="true"] { background: white; }
 
 #controls {
   position: absolute;
@@ -180,7 +289,7 @@ button:focus-visible {
 
 #chaos-wrap {
   position: absolute;
-  left: 18px;
+  right: 18px;
   top: 46%;
   transform: translateY(-50%);
   display: flex;
@@ -228,35 +337,6 @@ button:focus-visible {
 }
 
 #chaos-wrap.max #chaos-meter { animation: shake 0.18s linear infinite; }
-
-#badges {
-  position: absolute;
-  left: 50%;
-  bottom: 24px;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 8px;
-}
-
-.badge {
-  width: 48px;
-  height: 48px;
-  border-radius: 14px;
-  display: grid;
-  place-items: center;
-  font-size: 24px;
-  background: rgba(255, 255, 255, 0.35);
-  border: 3px solid rgba(0, 0, 0, 0.25);
-  filter: grayscale(1) brightness(1.2);
-}
-
-.badge.got {
-  filter: none;
-  background: white;
-  border-color: var(--ink);
-  box-shadow: 0 3px 0 var(--ink);
-  animation: pop 0.35s cubic-bezier(0.2, 1.4, 0.3, 1);
-}
 
 #toasts {
   position: absolute;
@@ -309,17 +389,13 @@ button:focus-visible {
 #popups .pop.combo { color: #9dffc9; font-size: 24px; }
 
 #hint {
-  position: absolute;
-  left: 50%;
-  bottom: 18px;
-  transform: translateX(-50%);
   z-index: 3;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   width: max-content;
-  max-width: min(320px, calc(100% - 300px));
+  max-width: 100%;
   pointer-events: none;
 }
 
@@ -742,27 +818,18 @@ h1 {
 }
 
 @media (max-width: 1100px) {
-  #hint {
-    top: 72px;
-    bottom: auto;
-    left: 14px;
-    transform: none;
-    align-items: flex-start;
-    max-width: min(240px, calc(100% - 28px));
-  }
   #hint-panel { width: 240px; padding: 6px 8px; }
   .keygrid { font-size: 11px; gap: 2px 8px; }
 }
 
 @media (max-width: 860px) {
-  #scoreboard { top: 62px; }
+  #corner { left: 12px; top: 12px; gap: 6px; }
   #score { font-size: 36px; }
   #chaos-meter { height: 150px; }
   h1 { font-size: 32px; }
 }
 
 @media (max-width: 560px) {
-  #badges { bottom: 196px; }
   #controls { max-width: 58vw; }
   #logo { font-size: 16px; }
   #btn-nest { left: 22px; bottom: 132px; min-width: 76px; padding: 6px 8px; font-size: 14px; }
