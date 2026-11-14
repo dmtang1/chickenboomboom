@@ -139,6 +139,9 @@ let seenRound = 0;
 let challengeOpen = false;
 let resultsOpen = false;
 let iAmReady = false;
+let readyAcc = 0;
+let challengeDeadline = 0;
+let selfUserId = '';
 const readyIds = new Set();
 let winnerIds = [];
 let finalBoard = [];
@@ -2820,11 +2823,29 @@ function challengeClockText(challenge) {
 }
 
 function challengePlayers() {
-  const rows = [{ id: myId(), name: myName() }];
+  const rows = [{ id: myId(), userId: selfUserId, name: myName() }];
   if (netRole === 'host') {
-    for (const peer of roster.values()) rows.push({ id: peer.id, name: peer.name || 'Chicken' });
+    for (const peer of roster.values()) {
+      if (!peer.id || peer.id === myId()) continue;
+      rows.push({ id: peer.id, userId: peer.userId || '', name: peer.name || 'Chicken' });
+    }
   }
   return rows;
+}
+
+function syncClock(seconds) {
+  challengeLeft = Math.max(0, Number(seconds) || 0);
+  challengeDeadline = challengeLeft > 0 ? performance.now() + challengeLeft * 1000 : 0;
+}
+
+function clockLeft() {
+  if (!challengeDeadline) return challengeLeft;
+  challengeLeft = Math.max(0, (challengeDeadline - performance.now()) / 1000);
+  if (challengeLeft <= 0) {
+    challengeLeft = 0;
+    challengeDeadline = 0;
+  }
+  return challengeLeft;
 }
 
 function noteHarborDunk(event) {
@@ -2869,7 +2890,7 @@ function judgeHarbor() {
 function endHarbor(winners, reason) {
   if (!winners.length || challengePhase === 'done') return;
   challengePhase = 'done';
-  challengeLeft = 0;
+  syncClock(0);
   winnerIds = winners.map((player) => player.id);
   if (winners.length > 1) challengeResult = 'TIE';
   else if (reason === 'dry') challengeResult = `${winners[0].name.toUpperCase()} STAYS DRY`;
@@ -2980,6 +3001,12 @@ function phaseRank(phase) {
 }
 
 function roundPacket() {
+  if (challengePhase === 'count' || challengePhase === 'live') clockLeft();
+  const rosterRows = challengePlayers().map((player) => ({
+    id: player.id,
+    userId: player.userId || '',
+    name: player.name,
+  }));
   return {
     t: 'round',
     challenge: challengeId,
@@ -2990,7 +3017,8 @@ function roundPacket() {
     result: challengeResult,
     ready: [...readyIds],
     winners: winnerIds,
-    players: challengePlayers().map((player) => ({ id: player.id, name: player.name })),
+    players: rosterRows,
+    roster: rosterRows,
     board: finalBoard.length ? finalBoard : boardRows(),
   };
 }
@@ -3014,12 +3042,13 @@ function proposeChallenge(id, byName) {
   challengeBy = byName || myName();
   challengeRound += 1;
   challengePhase = 'ready';
-  challengeLeft = 0;
+  syncClock(0);
   challengeResult = '';
   winnerIds = [];
   finalBoard = [];
   readyIds.clear();
   iAmReady = false;
+  readyAcc = 0;
   resultsOpen = false;
   setChallengeOpen(false);
   if (started) closeMenu();
@@ -3035,28 +3064,51 @@ function settleReady() {
   }
   if (players.length && players.every((player) => readyIds.has(player.id))) {
     challengePhase = 'count';
-    challengeLeft = 3;
+    syncClock(3);
+    readyAcc = 0;
     if (started) closeMenu();
     callout('3');
   }
   broadcastRound();
 }
 
-function acceptReady(id) {
+function acceptReady(id, userId) {
   if (netRole !== 'host' || challengePhase !== 'ready') return;
-  if (!challengePlayers().some((player) => player.id === id)) return;
-  readyIds.add(id);
-  settleReady();
+  const players = challengePlayers();
+  let match = players.find((player) => player.id === id);
+  if (!match && userId) {
+    const hits = players.filter((player) => player.userId && player.userId === userId);
+    if (hits.length === 1) match = hits[0];
+  }
+  if (!match && id && id !== myId()) {
+    const pending = players.filter((player) => player.id !== myId() && !readyIds.has(player.id));
+    if (pending.length === 1) match = pending[0];
+  }
+  if (!match) return;
+  const added = !readyIds.has(match.id);
+  readyIds.add(match.id);
+  if (added) settleReady();
+  else broadcastRound();
 }
 
 function sendReady() {
-  if (challengePhase !== 'ready' || iAmReady) return;
+  if (challengePhase !== 'ready') return;
   iAmReady = true;
-  if (netRole === 'host') acceptReady(myId());
+  readyAcc = 0;
+  if (netRole === 'host') acceptReady(myId(), selfUserId);
   else if (netRole === 'guest') {
-    netSend({ t: 'ready', round: challengeRound });
+    netSend({ t: 'ready', round: challengeRound, id: myId(), user: selfUserId });
     syncChallengeOverlay();
   }
+}
+
+function pumpReady(dt) {
+  if (challengePhase !== 'ready' || !iAmReady || netRole !== 'guest') return;
+  if (lobbyReady.has(myId())) return;
+  readyAcc += dt;
+  if (readyAcc < 0.4) return;
+  readyAcc = 0;
+  netSend({ t: 'ready', round: challengeRound, id: myId(), user: selfUserId });
 }
 
 function challengeStatus() {
@@ -3085,7 +3137,7 @@ function beginLiveChallenge() {
   if (!challenge || netRole !== 'host' || challengePhase !== 'count') return;
   freshRun();
   challengePhase = 'live';
-  challengeLeft = challenge.seconds || 0;
+  syncClock(challenge.seconds || 0);
   challengeResult = '';
   resultsOpen = false;
   setChallengeOpen(false);
@@ -3097,7 +3149,7 @@ function beginLiveChallenge() {
 function finishChallenge() {
   if (challengePhase !== 'live') return;
   challengePhase = 'done';
-  challengeLeft = 0;
+  syncClock(0);
   const board = boardRows();
   const top = board.length ? board[0].score : 0;
   const winners = top > 0 ? board.filter((row) => row.score === top) : [];
@@ -3117,16 +3169,20 @@ function holdStreet() {
   if (challengePhase === 'ready' || challengePhase === 'count' || (challengePhase === 'done' && resultsOpen)) closeMenu();
 }
 
-function tickChallenge(dt) {
+function tickChallenge() {
   if (netRole !== 'host' || !started) return;
+  if (challengePhase === 'ready') {
+    if (iAmReady && !readyIds.has(myId())) acceptReady(myId(), selfUserId);
+    return;
+  }
   if (challengePhase === 'count') {
     const shown = Math.ceil(challengeLeft);
-    challengeLeft -= dt;
-    if (challengeLeft <= 0) {
+    const left = clockLeft();
+    if (left <= 0) {
       beginLiveChallenge();
       return;
     }
-    const next = Math.ceil(challengeLeft);
+    const next = Math.ceil(left);
     if (next !== shown) {
       callout(String(next));
       broadcastRound();
@@ -3137,20 +3193,28 @@ function tickChallenge(dt) {
     return;
   }
   if (challengePhase !== 'live') return;
+  syncChallengeOverlay();
   const challenge = currentChallenge();
-  if (!challenge?.seconds) return;
-  challengeLeft -= dt;
   paintChallengeHud();
-  if (challengeLeft > 0) return;
-  challengeLeft = 0;
+  if (!challenge?.seconds) return;
+  if (clockLeft() > 0) return;
   finishChallenge();
 }
 
+function followChallengeHud() {
+  if (challengePhase !== 'count' && challengePhase !== 'live') return;
+  const shown = Math.ceil(challengeLeft);
+  clockLeft();
+  paintChallengeHud();
+  if (challengePhase === 'live' || Math.ceil(challengeLeft) !== shown) syncChallengeOverlay();
+}
+
 function copyLobby(data) {
-  if (Array.isArray(data.players)) lobbyPlayers = data.players.filter((player) => player && player.id);
+  const listed = Array.isArray(data.roster) ? data.roster : (data.t === 'round' && Array.isArray(data.players) ? data.players : null);
+  if (listed) lobbyPlayers = listed.filter((player) => player && player.id);
   if (Array.isArray(data.ready)) lobbyReady = new Set(data.ready);
   if (Array.isArray(data.winners)) winnerIds = data.winners;
-  if (typeof data.left === 'number') challengeLeft = data.left;
+  if (typeof data.left === 'number') syncClock(data.left);
   if (typeof data.result === 'string' && data.result) challengeResult = data.result;
   if (Array.isArray(data.board)) finalBoard = data.board;
 }
@@ -3175,6 +3239,7 @@ function adoptChallenge(data) {
   }
   if (round && round === challengeRound && phaseRank(phase) < phaseRank(challengePhase)) return;
   const prev = challengePhase;
+  const prevRound = challengeRound;
   if (round) {
     seenRound = round;
     challengeRound = round;
@@ -3185,8 +3250,9 @@ function adoptChallenge(data) {
   challengePhase = phase;
   setChallengeOpen(false);
   if (started && (phase === 'ready' || phase === 'count' || phase === 'live' || phase === 'done')) closeMenu();
-  if (phase === 'ready' && prev !== 'ready') {
+  if (phase === 'ready' && (prev !== 'ready' || round !== prevRound)) {
     iAmReady = false;
+    readyAcc = 0;
     resultsOpen = false;
     callout('GET READY!');
   } else if (phase === 'count' && prev !== 'count') {
@@ -3219,7 +3285,8 @@ function resultsTitle() {
 
 function waitingText() {
   const players = netRole === 'host' ? challengePlayers() : lobbyPlayers;
-  const ready = netRole === 'host' ? readyIds : lobbyReady;
+  const ready = new Set(netRole === 'host' ? readyIds : lobbyReady);
+  if (iAmReady) ready.add(myId());
   const missing = players.filter((player) => !ready.has(player.id));
   if (!players.length) return 'Hit OK. The challenge starts when every chicken does.';
   if (!missing.length) return 'Everyone is ready.';
@@ -3291,7 +3358,7 @@ function syncChallengeOverlay() {
   if (button) {
     const ready = challengePhase === 'ready';
     button.hidden = !ready;
-    button.disabled = ready && iAmReady;
+    button.disabled = false;
     button.textContent = iAmReady ? 'READY' : 'OK';
   }
 }
@@ -3300,12 +3367,13 @@ function clearChallenge() {
   challengeId = '';
   challengeBy = '';
   challengePhase = '';
-  challengeLeft = 0;
+  syncClock(0);
   challengeResult = '';
   challengeRound = 0;
   seenRound = 0;
   resultsOpen = false;
   iAmReady = false;
+  readyAcc = 0;
   readyIds.clear();
   winnerIds = [];
   finalBoard = [];
@@ -3914,11 +3982,12 @@ function publishNet(dt) {
       city,
       challenge: challengeId,
       phase: challengePhase,
-      left: Math.max(0, challengeLeft),
+      left: Math.max(0, challengePhase === 'count' || challengePhase === 'live' ? clockLeft() : challengeLeft),
       result: challengeResult,
       round: challengeRound,
       ready: [...readyIds],
       winners: winnerIds,
+      roster: challengePlayers().map((player) => ({ id: player.id, userId: player.userId || '', name: player.name })),
     };
   } catch (error) {
     console.error(error);
@@ -4293,13 +4362,16 @@ function stepGuest(dt) {
   updateCamera(dt, torso);
   updateHud();
   popups.update(dt);
+  pumpReady(dt);
+  followChallengeHud();
   holdStreet();
 }
 
-function onNetMessage(data, peerId) {
+function onNetMessage(data, peerId, userId) {
   if (!data || typeof data !== 'object') return;
   if (netRole === 'host') {
     const peer = roster.get(peerId);
+    if (peer && userId) peer.userId = userId;
     if (data.t === 'hi') {
       const name = cleanName(data.name);
       pendingNames.set(peerId, name);
@@ -4317,8 +4389,10 @@ function onNetMessage(data, peerId) {
       return;
     }
     if (data.t === 'ready') {
-      if (Number(data.round) !== challengeRound) return;
-      acceptReady(peerId);
+      if (challengePhase !== 'ready') return;
+      const round = Number(data.round);
+      if (Number.isFinite(round) && round !== challengeRound) return;
+      acceptReady(data.id || peerId, userId || data.user || '');
       return;
     }
     if (!peer) return;
@@ -4376,16 +4450,20 @@ function onNetMessage(data, peerId) {
   } else if (data.t === 'fx' && started) playNetFx(data);
 }
 
-function onPeerJoin(peerId) {
+function onPeerJoin(peerId, userId) {
   if (netRole === 'guest') {
     announceName();
     return;
   }
-  if (netRole !== 'host' || peerId === selfPeerId) return;
-  if (roster.has(peerId)) return;
+  if (netRole !== 'host' || !peerId || peerId === selfPeerId) return;
+  if (roster.has(peerId)) {
+    if (userId) roster.get(peerId).userId = userId;
+    return;
+  }
   const slot = nextSlot();
   roster.set(peerId, {
     id: peerId,
+    userId: userId || '',
     name: pendingNames.get(peerId) || 'Friend',
     slot,
     color: FEATHERS[slot % FEATHERS.length],
@@ -4508,7 +4586,10 @@ async function openRoom(code, role) {
     });
     await session.ready;
     const previousId = myId();
-    selfPeerId = await session.selfId();
+    const info = await session.selfInfo();
+    selfPeerId = info.peerId;
+    selfUserId = info.userId || '';
+    if (roster.has(selfPeerId)) roster.delete(selfPeerId);
     if (previousId !== selfPeerId) {
       if (points.has(previousId)) {
         points.set(selfPeerId, points.get(previousId));

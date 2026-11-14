@@ -11,8 +11,8 @@ export function connectRoom(code, handlers) {
   }, `cbb-${code}`);
   const action = room.makeAction('m');
   const unsubscribe = [
-    action.onMessage((data, context) => handlers.onMessage(data, context.peerId)),
-    room.onPeerJoin((context) => handlers.onJoin(context.peerId), { replay: true }),
+    action.onMessage((data, context) => handlers.onMessage(data, context.peerId, context.userId)),
+    room.onPeerJoin((context) => handlers.onJoin(context.peerId, context.userId), { replay: true }),
     room.onPeerLeave((context) => handlers.onLeave(context.peerId)),
     room.onError((error) => handlers.onError(error)),
   ];
@@ -27,6 +27,9 @@ export function connectRoom(code, handlers) {
     async selfId() {
       const info = await room.getSelf();
       return info.peerId;
+    },
+    selfInfo() {
+      return room.getSelf();
     },
     send(data, target) {
       const options = target ? { target } : undefined;
