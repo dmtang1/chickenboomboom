@@ -309,6 +309,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let mirror = false;
   let shared = false;
   let actors = [ragdoll];
+  const shoved = new Map();
+  const shoveHooks = new WeakSet();
   const carGhosts = new Map();
   const junkGhosts = new Map();
   const ghostQA = new THREE.Quaternion();
@@ -2626,6 +2628,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     if (index >= 0) cars.splice(index, 1);
     if (driver) {
       car.pilot = null;
+      car.body.driver = null;
       car.driven = false;
       if (ride === car) {
         ride = null;
@@ -3157,6 +3160,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.driven = true;
     car.pursuit = false;
     car.pilot = doll;
+    car.body.driver = doll;
     car.px = pose.x;
     car.pz = pose.z;
     car.yaw = pose.yaw;
@@ -3200,6 +3204,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.loose = true;
     car.rogue = true;
     car.pilot = null;
+    car.body.driver = null;
     car.gas = 0;
     car.wheel = 0;
     if (ride === car) {
@@ -5118,6 +5123,57 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     district = null;
   }
 
+  function markShove(victim, attacker) {
+    if (!victim || !attacker || victim === attacker) return;
+    shoved.set(victim, { by: attacker, at: performance.now() });
+  }
+
+  function creditTouch(a, b, now) {
+    if (!a || !b) return;
+    const dollA = a.doll;
+    const dollB = b.doll;
+    if (dollA && dollB && dollA !== dollB && actors.includes(dollA) && actors.includes(dollB)) {
+      const as = a.velocity.x * a.velocity.x + a.velocity.z * a.velocity.z;
+      const bs = b.velocity.x * b.velocity.x + b.velocity.z * b.velocity.z;
+      if (as > bs + 0.25 && as > 0.8) shoved.set(dollB, { by: dollA, at: now });
+      else if (bs > as + 0.25 && bs > 0.8) shoved.set(dollA, { by: dollB, at: now });
+      return;
+    }
+    const carBody = a.gameRole === 'car' ? a : b.gameRole === 'car' ? b : null;
+    const ragBody = carBody === a ? b : carBody ? a : null;
+    const driver = carBody && carBody.driver;
+    if (!carBody || !ragBody || !ragBody.doll || !driver || driver === ragBody.doll) return;
+    if (!actors.includes(driver) || !actors.includes(ragBody.doll)) return;
+    const speed = carBody.velocity.x * carBody.velocity.x + carBody.velocity.z * carBody.velocity.z;
+    if (speed < 4) return;
+    shoved.set(ragBody.doll, { by: driver, at: now });
+  }
+
+  function hookShoveBody(body) {
+    if (!body || shoveHooks.has(body)) return;
+    shoveHooks.add(body);
+    body.addEventListener('collide', function onShove(event) {
+      creditTouch(this, event.body, performance.now());
+    });
+  }
+
+  function watchShoves() {
+    const now = performance.now();
+    for (const doll of actors) {
+      if (doll.walking()) hookShoveBody(doll.mover());
+      for (const part of doll.parts) hookShoveBody(part.body);
+    }
+    const contacts = world.contacts;
+    for (let i = 0; i < contacts.length; i++) creditTouch(contacts[i].bi, contacts[i].bj, now);
+  }
+
+  function shoveCredit(victim) {
+    const hit = shoved.get(victim);
+    if (!hit || performance.now() - hit.at > 5000) return null;
+    if (!actors.includes(hit.by)) return null;
+    return hit.by;
+  }
+
   function containActors() {
     if (mirror) return;
     const water = GROUND_Y - WATER_DROP + 1.1;
@@ -5126,6 +5182,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       const body = doll.walking() ? doll.mover() : doll.torso.body;
       if (!body || body.position.y > water) continue;
       const wetDistrict = districtAt(body.position.x, body.position.z);
+      const harbor = wetDistrict === 'harbor';
+      const shover = harbor ? shoveCredit(doll) : null;
+      if (harbor) shoved.delete(doll);
       const spot = islandClamp(body.position.x, body.position.z, 2.4);
       if (doll.walking()) {
         const walker = doll.mover();
@@ -5154,7 +5213,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         pos: { x: spot.x, y: GROUND_Y + 1.2, z: spot.z },
         burst: 'chip',
         who: doll,
-        unlock: wetDistrict === 'harbor' && doll === ragdoll ? 'overboard' : '',
+        by: shover || undefined,
+        dunk: harbor,
+        unlock: harbor && doll === ragdoll ? 'overboard' : '',
       });
     }
   }
@@ -5172,6 +5233,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (!car.pilot) continue;
       const doll = car.pilot;
       car.pilot = null;
+      car.body.driver = null;
       car.driven = false;
       if (doll.walking()) unpinDoll(doll);
     }
@@ -5222,6 +5284,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     stillTime = 0;
     campSet = false;
     prey.still = false;
+    shoved.clear();
     indoors.clear();
     roomReturn.clear();
     roomGraceDolls.clear();
@@ -5304,15 +5367,32 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       ];
     }
     const spots = [];
+    let sx = 0;
+    let sz = 0;
+    let n = 0;
     for (const part of doll.parts) {
-      if (part.name !== 'torso' && part.name !== 'head') continue;
       const p = part.body.position;
+      const head = part.name === 'head';
       spots.push({
         x: p.x,
         y: p.y,
         z: p.z,
-        r: part.name === 'head' ? 0.38 : 0.58,
-        part: part.name,
+        r: head ? 0.5 : part.name === 'torso' ? 0.78 : 0.52,
+        rise: 1.7,
+        part: head ? 'head' : 'body',
+      });
+      sx += p.x;
+      sz += p.z;
+      n += 1;
+    }
+    if (n) {
+      spots.push({
+        x: sx / n,
+        y: GROUND_Y + 0.3,
+        z: sz / n,
+        r: 1.05,
+        rise: 1.75,
+        part: 'body',
       });
     }
     return spots;
@@ -5322,9 +5402,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     let found = '';
     for (const spot of birdSpots(doll)) {
       const dx = spot.x - x;
-      const dy = spot.y - y;
       const dz = spot.z - z;
-      if (dx * dx + dy * dy + dz * dz > spot.r * spot.r) continue;
+      if (spot.rise) {
+        if (dx * dx + dz * dz > spot.r * spot.r) continue;
+        if (y < spot.y - spot.r || y > spot.y + spot.rise) continue;
+      } else {
+        const dy = spot.y - y;
+        if (dx * dx + dy * dy + dz * dz > spot.r * spot.r) continue;
+      }
       if (spot.part === 'head') return 'head';
       found = spot.part;
     }
@@ -5337,6 +5422,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function launchBird(doll, grip, power, part) {
+    markShove(doll, creditDoll);
     if (pilotOf(doll)) hopOutDoll(doll);
     const at = birdCenter(doll);
     const word = part === 'head' ? 'BEAK!' : power.callout;
@@ -7690,6 +7776,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         streetX = spot ? spot.x : prey.x;
         streetZ = spot ? spot.z : prey.z;
       }
+      watchShoves();
       sky.position.set(streetX, GROUND_Y, streetZ);
       farGround.position.x = streetX;
       farGround.position.z = streetZ;

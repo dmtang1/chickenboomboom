@@ -27,6 +27,28 @@ const BADGES = [
   { id: 'balloon', icon: '🎈', name: 'Balloon Bandit', desc: 'Pop 5 carnival balloons', where: 'street' },
 ];
 
+const CHALLENGES = [
+  {
+    id: 'smash-minute',
+    icon: '💥',
+    name: 'Smash Minute',
+    desc: 'Sixty seconds. Highest smash score wins. Carts, meters, crates, and balloons count.',
+    seconds: 60,
+    callout: 'SMASH!',
+    liveNote: 'Highest smash score wins.',
+  },
+  {
+    id: 'harbor-dunk',
+    icon: '💦',
+    name: 'Harbor Dunk',
+    desc: 'Shove friends into the harbor. First to three dunks wins, or the last chicken still dry.',
+    seconds: 0,
+    goal: 3,
+    callout: 'DUNK!',
+    liveNote: 'First to 3 dunks, or the last chicken still dry.',
+  },
+];
+
 const canvas = document.querySelector('#view');
 const renderer = new THREE.WebGLRenderer({
   canvas,
@@ -107,6 +129,22 @@ let selfPeerId = '';
 let hostPeerId = '';
 let myColor = FEATHERS[0];
 let roomCode = '';
+let challengeId = '';
+let challengeBy = '';
+let challengePhase = '';
+let challengeLeft = 0;
+let challengeResult = '';
+let challengeRound = 0;
+let seenRound = 0;
+let challengeOpen = false;
+let resultsOpen = false;
+let iAmReady = false;
+const readyIds = new Set();
+let winnerIds = [];
+let finalBoard = [];
+let lobbyPlayers = [];
+let lobbyReady = new Set();
+const soaked = new Set();
 const roster = new Map();
 const pendingNames = new Map();
 const guestDolls = new Map();
@@ -664,7 +702,8 @@ window.addEventListener('keydown', (e) => {
   if (menuOpen) {
     if (e.code === 'Enter' || e.code === 'Space') {
       e.preventDefault();
-      if (netRole === 'host' && !roomPanelHidden()) startTogether();
+      if (netRole === 'guest' && started && !roomPanelHidden()) closeMenu();
+      else if (netRole === 'host' && !roomPanelHidden()) startTogether();
       else if (netRole !== 'guest') playBtn.click();
     }
     if (e.code === 'Escape' && started) closeMenu();
@@ -736,8 +775,12 @@ renderer.setAnimationLoop((now) => {
     fpsAccum = 0;
     fpsFrames = 0;
   }
-  step(dt);
-  renderer.render(scene, camera);
+  try {
+    step(dt);
+    renderer.render(scene, camera);
+  } catch (error) {
+    console.error(error);
+  }
 });
 
 function step(dt) {
@@ -1031,6 +1074,8 @@ function step(dt) {
   updateCamera(dt, torso);
   updateHud();
   popups.update(dt);
+  tickChallenge(dt);
+  holdStreet();
   publishNet(dt);
 }
 
@@ -1398,6 +1443,7 @@ function handleImpact({ impact, pos, item, direct, flair, duckOrbit }) {
 }
 
 function addScore(base, pos, impact, flair, by) {
+  if (challengePhase === 'done' || harborLive()) return;
   const id = scorerId(by);
   const row = pointRow(id);
   const now = performance.now();
@@ -1615,6 +1661,7 @@ function freshRun() {
   heliTime = 0;
   streak = 0;
   knocks.length = 0;
+  soaked.clear();
   if (ranksList) delete ranksList.dataset.sig;
   updateScoreHud(false);
   renderRanks();
@@ -1752,7 +1799,8 @@ function launchLevel() {
     logoSub.textContent = 'BOOM BOOM';
     flailBtn.textContent = 'SWING';
     streetHint();
-    callout('BUKAWK!');
+    if (currentChallenge() && challengePhase === 'live') callout(currentChallenge().callout || 'SMASH!');
+    else if (!(currentChallenge() && challengePhase === 'done')) callout('BUKAWK!');
   } else {
     stairs.clear();
     streets.clear();
@@ -1793,6 +1841,8 @@ function launchLevel() {
     syncActors();
   }
   refreshNetBadge();
+  paintChallenges();
+  paintChallengeHud();
 }
 
 function openMenu() {
@@ -1805,6 +1855,7 @@ function openMenu() {
   document.documentElement.removeAttribute('data-resume');
   playBtn.textContent = started ? 'BACK TO THE STREET' : 'PLAY';
   syncMainMenuButton();
+  syncRoomPlay();
   splash.hidden = false;
 }
 
@@ -2071,6 +2122,7 @@ function packBoard(id, name, color, row, trick, air, up) {
     fall: Math.floor(trick.bestFall),
     air: Math.floor(air) || 0,
     up: Math.floor(up) || 0,
+    wet: soaked.has(id) ? 1 : 0,
     riding: trick.riding ? 1 : 0,
     roofNow: Math.floor(trick.roofNow) || 0,
     fallNow: trick.falling ? 1 : 0,
@@ -2095,7 +2147,7 @@ renderBests();
 function renderRanks(rows) {
   if (!ranksList || !netRole) return;
   const list = rows || boardRows();
-  const signature = list.map((row) => `${row.id}:${row.score}:${row.name}`).join('|');
+  const signature = `${list.map((row) => `${row.id}:${row.score}:${row.wet || 0}:${row.name}`).join('|')}|${challengeId}:${challengePhase}`;
   if (signature === ranksList.dataset.sig) return;
   ranksList.dataset.sig = signature;
   ranksList.replaceChildren();
@@ -2105,9 +2157,10 @@ function renderRanks(rows) {
     const who = document.createElement('span');
     const swatch = document.createElement('i');
     swatch.style.background = cssColor(row.color);
-    who.append(swatch, document.createTextNode(`${index + 1} ${row.name}`));
+    const dunks = showingDunks();
+    who.append(swatch, document.createTextNode(`${index + 1} ${row.name}${dunks && row.wet ? ' · wet' : ''}`));
     const pts = document.createElement('b');
-    pts.textContent = String(row.score);
+    pts.textContent = dunks ? `${row.score}/${currentChallenge().goal || 3}` : String(row.score);
     item.append(who, pts);
     ranksList.appendChild(item);
   });
@@ -2167,6 +2220,7 @@ function setBestsOpen(open) {
 }
 
 function onStreetEvent(e) {
+  if (e.dunk && harborLive() && e.by && e.who && e.by !== e.who) e.callout = 'DUNK!';
   const victim = streetVictim(e);
   const hear = !victim || victim === ragdoll;
   if (hear && e.honk) sfx.honk();
@@ -2191,6 +2245,7 @@ function onStreetEvent(e) {
   if (e.callout) callout(e.callout);
   if (e.shake) shake(e.shake);
   if (e.score && e.pos) addScore(e.score, e.pos, e.impact || 6, e.flair || null, e.by);
+  if (e.dunk) noteHarborDunk(e);
   if (e.burst && e.pos) {
     const colors = e.burst === 'boom'
       ? [0xfff1a8, 0xff7a18, 0xff3355, 0x2b2f38, 0xffffff]
@@ -2408,6 +2463,7 @@ function updateHud() {
   const armed = started && !menuOpen && streetLevel() && !!heldWeaponName();
   dropBtn.hidden = !(touchDevice && armed);
   updateComboHud();
+  paintChallengeHud();
 }
 
 function updateScoreHud(punch) {
@@ -2723,8 +2779,558 @@ function setRoomStatus(text) {
   if (roomStatus) roomStatus.textContent = text;
 }
 
+function currentChallenge() {
+  return CHALLENGES.find((row) => row.id === challengeId) || null;
+}
+
+function formatChallengeTime(seconds) {
+  const left = Math.max(0, Math.ceil(seconds));
+  const mins = Math.floor(left / 60);
+  const secs = left % 60;
+  return `${mins}:${String(secs).padStart(2, '0')}`;
+}
+
+function challengeShout() {
+  if (challengeResult === 'TIE') return 'TIE!';
+  if (challengeResult === 'TIME') return 'TIME!';
+  return challengeResult;
+}
+
+function harborLive() {
+  return challengePhase === 'live' && currentChallenge()?.id === 'harbor-dunk';
+}
+
+function showingDunks() {
+  const challenge = currentChallenge();
+  return !!challenge && challenge.id === 'harbor-dunk' && (challengePhase === 'live' || challengePhase === 'done');
+}
+
+function challengeLiveNote(challenge) {
+  if (!challenge) return '';
+  if (challenge.seconds) return `${formatChallengeTime(challengeLeft)} left. ${challenge.liveNote}`;
+  return challenge.liveNote || '';
+}
+
+function challengeClockText(challenge) {
+  if (challengePhase === 'ready') return 'READY';
+  if (challengePhase === 'count') return String(Math.max(1, Math.ceil(challengeLeft)));
+  if (challengePhase === 'done') return challengeResult;
+  if (challenge.id === 'harbor-dunk') return `${score}/${challenge.goal || 3}`;
+  return formatChallengeTime(challengeLeft);
+}
+
+function challengePlayers() {
+  const rows = [{ id: myId(), name: myName() }];
+  if (netRole === 'host') {
+    for (const peer of roster.values()) rows.push({ id: peer.id, name: peer.name || 'Chicken' });
+  }
+  return rows;
+}
+
+function noteHarborDunk(event) {
+  if (!harborLive() || netRole !== 'host') return;
+  const victimId = dollPeerId(event.who);
+  if (!victimId) return;
+  soaked.add(victimId);
+  const shoverId = event.by && event.by !== event.who ? dollPeerId(event.by) : '';
+  if (shoverId && shoverId !== victimId) {
+    const row = pointRow(shoverId);
+    row.score += 1;
+    if (shoverId === myId()) {
+      score = row.score;
+      updateScoreHud(true);
+    }
+    if (event.pos && popupsThisFrame < 12) {
+      popups.spawn(event.pos, `DUNK ${row.score}`, 'smash');
+      popupsThisFrame += 1;
+    }
+  }
+  if (ranksList) delete ranksList.dataset.sig;
+  renderRanks();
+  judgeHarbor();
+}
+
+function judgeHarbor() {
+  if (!harborLive() || netRole !== 'host') return;
+  const challenge = currentChallenge();
+  const goal = challenge.goal || 3;
+  const players = challengePlayers();
+  const dunksOf = (id) => pointRow(id).score;
+  let top = 0;
+  for (const player of players) top = Math.max(top, dunksOf(player.id));
+  if (top >= goal) {
+    endHarbor(players.filter((player) => dunksOf(player.id) >= goal), 'goal');
+    return;
+  }
+  const dry = players.filter((player) => !soaked.has(player.id));
+  if (players.length >= 2 && dry.length === 1 && soaked.size > 0) endHarbor(dry, 'dry');
+}
+
+function endHarbor(winners, reason) {
+  if (!winners.length || challengePhase === 'done') return;
+  challengePhase = 'done';
+  challengeLeft = 0;
+  winnerIds = winners.map((player) => player.id);
+  if (winners.length > 1) challengeResult = 'TIE';
+  else if (reason === 'dry') challengeResult = `${winners[0].name.toUpperCase()} STAYS DRY`;
+  else challengeResult = `${winners[0].name.toUpperCase()} WINS`;
+  finalBoard = boardRows();
+  resultsOpen = true;
+  if (started) closeMenu();
+  callout(challengeShout());
+  challengeStatus();
+  broadcastRound();
+}
+
+function paintChallengeHud() {
+  const clock = document.querySelector('#challenge-clock');
+  const title = document.querySelector('#ranks-challenge');
+  const challenge = currentChallenge();
+  const show = !!(started && challenge && (challengePhase === 'ready' || challengePhase === 'count' || challengePhase === 'live' || challengePhase === 'done'));
+  if (clock) {
+    clock.hidden = !show;
+    clock.classList.toggle('done', challengePhase === 'done');
+    if (show) clock.textContent = challengeClockText(challenge);
+  }
+  if (title) {
+    title.hidden = !show;
+    if (show) {
+      title.textContent = challengePhase === 'done'
+        ? `${challenge.name} · ${challengeResult}`
+        : `${challenge.name} · ${challengeClockText(challenge)}`;
+    }
+  }
+  const note = document.querySelector('#challenge-note');
+  if (note && challenge && challengePhase === 'live') note.textContent = challengeLiveNote(challenge);
+}
+
+function setChallengeOpen(open) {
+  challengeOpen = !!open;
+  const panel = document.querySelector('#challenge-panel');
+  const button = document.querySelector('#btn-challenge');
+  if (panel) panel.hidden = !challengeOpen || !netRole || !started;
+  if (button) button.setAttribute('aria-expanded', challengeOpen ? 'true' : 'false');
+}
+
+function paintChallenges() {
+  const button = document.querySelector('#btn-challenge');
+  const list = document.querySelector('#challenge-list');
+  const playing = !!(netRole && started);
+  if (button) button.hidden = !playing;
+  if (!playing) setChallengeOpen(false);
+  if (!list) return;
+  list.replaceChildren();
+  for (const challenge of CHALLENGES) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'level challenge';
+    const picked = challenge.id === challengeId && !!challengePhase;
+    if (picked) card.classList.add('is-picked');
+    card.setAttribute('aria-pressed', picked ? 'true' : 'false');
+    const icon = document.createElement('span');
+    icon.className = 'level-icon';
+    icon.textContent = challenge.icon;
+    const copy = document.createElement('span');
+    const name = document.createElement('b');
+    name.className = 'level-name';
+    name.textContent = challenge.name;
+    const desc = document.createElement('span');
+    desc.className = 'level-desc';
+    desc.textContent = challenge.desc;
+    copy.append(name, desc);
+    card.append(icon, copy);
+    card.addEventListener('click', () => chooseChallenge(challenge.id));
+    list.appendChild(card);
+  }
+  const note = document.querySelector('#challenge-note');
+  if (!note || (currentChallenge() && challengePhase && challengePhase !== 'done')) return;
+  if (challengePhase === 'done' && challengeResult) note.textContent = challengeShout();
+  else note.textContent = 'Anyone in the room can start one.';
+}
+
+function chooseChallenge(id) {
+  sfx.ui();
+  if (!CHALLENGES.some((row) => row.id === id)) return;
+  if (!started || !netRole) return;
+  if (challengePhase === 'live' || challengePhase === 'ready' || challengePhase === 'count') {
+    setChallengeNote('This challenge is already going.');
+    return;
+  }
+  setChallengeOpen(false);
+  if (netRole === 'guest') {
+    netSend({ t: 'pick', id });
+    setChallengeNote('Asking the room to start it.');
+    return;
+  }
+  if (netRole !== 'host') return;
+  proposeChallenge(id, myName());
+}
+
+function setChallengeNote(text) {
+  const note = document.querySelector('#challenge-note');
+  if (note) note.textContent = text;
+}
+
+function phaseRank(phase) {
+  if (phase === 'ready') return 1;
+  if (phase === 'count') return 2;
+  if (phase === 'live') return 3;
+  if (phase === 'done') return 4;
+  return 0;
+}
+
+function roundPacket() {
+  return {
+    t: 'round',
+    challenge: challengeId,
+    round: challengeRound,
+    phase: challengePhase,
+    by: challengeBy,
+    left: challengeLeft,
+    result: challengeResult,
+    ready: [...readyIds],
+    winners: winnerIds,
+    players: challengePlayers().map((player) => ({ id: player.id, name: player.name })),
+    board: finalBoard.length ? finalBoard : boardRows(),
+  };
+}
+
+function broadcastRound() {
+  if (netRole !== 'host') return;
+  netSend(roundPacket());
+  challengeStatus();
+  syncChallengeOverlay();
+  paintChallenges();
+  paintChallengeHud();
+  if (ranksList) delete ranksList.dataset.sig;
+  renderRanks();
+}
+
+function proposeChallenge(id, byName) {
+  const challenge = CHALLENGES.find((row) => row.id === id);
+  if (!challenge || netRole !== 'host' || !started) return;
+  if (challengePhase === 'live' || challengePhase === 'ready' || challengePhase === 'count') return;
+  challengeId = challenge.id;
+  challengeBy = byName || myName();
+  challengeRound += 1;
+  challengePhase = 'ready';
+  challengeLeft = 0;
+  challengeResult = '';
+  winnerIds = [];
+  finalBoard = [];
+  readyIds.clear();
+  iAmReady = false;
+  resultsOpen = false;
+  setChallengeOpen(false);
+  if (started) closeMenu();
+  callout('GET READY!');
+  broadcastRound();
+}
+
+function settleReady() {
+  if (netRole !== 'host' || challengePhase !== 'ready') return;
+  const players = challengePlayers();
+  for (const id of [...readyIds]) {
+    if (!players.some((player) => player.id === id)) readyIds.delete(id);
+  }
+  if (players.length && players.every((player) => readyIds.has(player.id))) {
+    challengePhase = 'count';
+    challengeLeft = 3;
+    if (started) closeMenu();
+    callout('3');
+  }
+  broadcastRound();
+}
+
+function acceptReady(id) {
+  if (netRole !== 'host' || challengePhase !== 'ready') return;
+  if (!challengePlayers().some((player) => player.id === id)) return;
+  readyIds.add(id);
+  settleReady();
+}
+
+function sendReady() {
+  if (challengePhase !== 'ready' || iAmReady) return;
+  iAmReady = true;
+  if (netRole === 'host') acceptReady(myId());
+  else if (netRole === 'guest') {
+    netSend({ t: 'ready', round: challengeRound });
+    syncChallengeOverlay();
+  }
+}
+
+function challengeStatus() {
+  const challenge = currentChallenge();
+  if (!challenge) return;
+  if (challengePhase === 'ready') {
+    setChallengeNote('Hit OK on the prompt. It starts when every chicken has.');
+    return;
+  }
+  if (challengePhase === 'count') {
+    setChallengeNote('The countdown is running.');
+    return;
+  }
+  if (challengePhase === 'live') {
+    setChallengeNote(`${challenge.name} is on. ${challenge.liveNote || ''}`.trim());
+    return;
+  }
+  if (challengePhase !== 'done') return;
+  if (challengeResult === 'TIE') setChallengeNote(`${challenge.name} ended in a tie.`);
+  else if (challengeResult === 'TIME') setChallengeNote(`${challenge.name} ended with no smashes.`);
+  else setChallengeNote(`${challenge.name} is over. ${challengeResult}.`);
+}
+
+function beginLiveChallenge() {
+  const challenge = currentChallenge();
+  if (!challenge || netRole !== 'host' || challengePhase !== 'count') return;
+  freshRun();
+  challengePhase = 'live';
+  challengeLeft = challenge.seconds || 0;
+  challengeResult = '';
+  resultsOpen = false;
+  setChallengeOpen(false);
+  if (started) closeMenu();
+  callout(challenge.callout || 'SMASH!');
+  broadcastRound();
+}
+
+function finishChallenge() {
+  if (challengePhase !== 'live') return;
+  challengePhase = 'done';
+  challengeLeft = 0;
+  const board = boardRows();
+  const top = board.length ? board[0].score : 0;
+  const winners = top > 0 ? board.filter((row) => row.score === top) : [];
+  winnerIds = winners.map((row) => row.id);
+  finalBoard = board;
+  resultsOpen = true;
+  if (started) closeMenu();
+  if (!winners.length) challengeResult = 'TIME';
+  else if (winners.length > 1) challengeResult = 'TIE';
+  else challengeResult = `${winners[0].name.toUpperCase()} WINS`;
+  callout(challengeShout());
+  broadcastRound();
+}
+
+function holdStreet() {
+  if (!started || !menuOpen) return;
+  if (challengePhase === 'ready' || challengePhase === 'count' || (challengePhase === 'done' && resultsOpen)) closeMenu();
+}
+
+function tickChallenge(dt) {
+  if (netRole !== 'host' || !started) return;
+  if (challengePhase === 'count') {
+    const shown = Math.ceil(challengeLeft);
+    challengeLeft -= dt;
+    if (challengeLeft <= 0) {
+      beginLiveChallenge();
+      return;
+    }
+    const next = Math.ceil(challengeLeft);
+    if (next !== shown) {
+      callout(String(next));
+      broadcastRound();
+    } else {
+      syncChallengeOverlay();
+      paintChallengeHud();
+    }
+    return;
+  }
+  if (challengePhase !== 'live') return;
+  const challenge = currentChallenge();
+  if (!challenge?.seconds) return;
+  challengeLeft -= dt;
+  paintChallengeHud();
+  if (challengeLeft > 0) return;
+  challengeLeft = 0;
+  finishChallenge();
+}
+
+function copyLobby(data) {
+  if (Array.isArray(data.players)) lobbyPlayers = data.players.filter((player) => player && player.id);
+  if (Array.isArray(data.ready)) lobbyReady = new Set(data.ready);
+  if (Array.isArray(data.winners)) winnerIds = data.winners;
+  if (typeof data.left === 'number') challengeLeft = data.left;
+  if (typeof data.result === 'string' && data.result) challengeResult = data.result;
+  if (Array.isArray(data.board)) finalBoard = data.board;
+}
+
+function adoptChallenge(data) {
+  if (netRole !== 'guest') return;
+  const challenge = CHALLENGES.find((row) => row.id === data.challenge);
+  if (!challenge) return;
+  const round = Number(data.round) || 0;
+  const phase = data.phase || '';
+  if (!phase || (round && round < seenRound)) return;
+  if (round && round === challengeRound && phase === challengePhase) {
+    const before = Math.ceil(challengeLeft);
+    copyLobby(data);
+    if (phase === 'count') {
+      const after = Math.ceil(challengeLeft);
+      if (after > 0 && after !== before) callout(String(after));
+    }
+    syncChallengeOverlay();
+    paintChallengeHud();
+    return;
+  }
+  if (round && round === challengeRound && phaseRank(phase) < phaseRank(challengePhase)) return;
+  const prev = challengePhase;
+  if (round) {
+    seenRound = round;
+    challengeRound = round;
+  }
+  challengeId = challenge.id;
+  if (data.by) challengeBy = data.by;
+  copyLobby(data);
+  challengePhase = phase;
+  setChallengeOpen(false);
+  if (started && (phase === 'ready' || phase === 'count' || phase === 'live' || phase === 'done')) closeMenu();
+  if (phase === 'ready' && prev !== 'ready') {
+    iAmReady = false;
+    resultsOpen = false;
+    callout('GET READY!');
+  } else if (phase === 'count' && prev !== 'count') {
+    resultsOpen = false;
+    callout(String(Math.max(1, Math.ceil(challengeLeft || 3))));
+  } else if (phase === 'live' && prev !== 'live') {
+    resultsOpen = false;
+    if (!started) launchLevel();
+    else {
+      freshRun();
+      callout(challenge.callout || 'SMASH!');
+    }
+  } else if (phase === 'done' && prev !== 'done') {
+    challengeLeft = 0;
+    resultsOpen = true;
+    if (!started) launchLevel();
+    if (challengeResult) callout(challengeShout());
+  }
+  challengeStatus();
+  syncChallengeOverlay();
+  paintChallenges();
+  paintChallengeHud();
+}
+
+function resultsTitle() {
+  if (challengeResult === 'TIE') return "It's a tie";
+  if (challengeResult === 'TIME') return "Time's up";
+  return challengeResult || 'Challenge over';
+}
+
+function waitingText() {
+  const players = netRole === 'host' ? challengePlayers() : lobbyPlayers;
+  const ready = netRole === 'host' ? readyIds : lobbyReady;
+  const missing = players.filter((player) => !ready.has(player.id));
+  if (!players.length) return 'Hit OK. The challenge starts when every chicken does.';
+  if (!missing.length) return 'Everyone is ready.';
+  if (missing.length === players.length) return 'Hit OK. The challenge starts when every chicken does.';
+  return `Waiting for ${missing.map((player) => player.name).join(', ')}.`;
+}
+
+function syncChallengeOverlay() {
+  const overlay = document.querySelector('#challenge-overlay');
+  const challenge = currentChallenge();
+  if (!overlay) return;
+  const briefing = challenge && (challengePhase === 'ready' || challengePhase === 'count');
+  const results = challenge && challengePhase === 'done' && resultsOpen;
+  overlay.hidden = !briefing && !results;
+  if (overlay.hidden) return;
+  const kicker = document.querySelector('#challenge-kicker');
+  const title = document.querySelector('#challenge-title');
+  const rules = document.querySelector('#challenge-rules');
+  const count = document.querySelector('#challenge-count');
+  const scores = document.querySelector('#challenge-scores');
+  const wait = document.querySelector('#challenge-wait');
+  const button = document.querySelector('#challenge-ok');
+  if (results) {
+    if (kicker) kicker.textContent = challenge.name;
+    if (title) title.textContent = resultsTitle();
+    if (rules) {
+      rules.hidden = challengeResult !== 'TIME';
+      rules.textContent = 'Nobody scored.';
+    }
+    if (count) count.hidden = true;
+    if (wait) wait.hidden = true;
+    if (scores) {
+      scores.hidden = false;
+      scores.replaceChildren();
+      const unit = challenge.id === 'harbor-dunk' ? 'dunks' : 'pts';
+      for (const row of finalBoard) {
+        const item = document.createElement('li');
+        if (winnerIds.includes(row.id)) item.className = 'win';
+        const name = document.createElement('span');
+        name.textContent = row.name || 'Chicken';
+        const pts = document.createElement('b');
+        pts.textContent = `${row.score} ${unit}`;
+        item.append(name, pts);
+        scores.appendChild(item);
+      }
+    }
+    if (button) {
+      button.hidden = false;
+      button.disabled = false;
+      button.textContent = 'OK';
+    }
+    return;
+  }
+  if (kicker) kicker.textContent = challengePhase === 'count' ? 'Starting together' : `${challengeBy || 'A chicken'} called a challenge`;
+  if (title) title.textContent = challenge.name;
+  if (rules) {
+    rules.hidden = false;
+    rules.textContent = challenge.desc;
+  }
+  if (count) {
+    count.hidden = challengePhase !== 'count';
+    if (challengePhase === 'count') count.textContent = String(Math.max(1, Math.ceil(challengeLeft)));
+  }
+  if (scores) scores.hidden = true;
+  if (wait) {
+    wait.hidden = false;
+    wait.textContent = challengePhase === 'count' ? 'Same countdown for the whole room.' : waitingText();
+  }
+  if (button) {
+    const ready = challengePhase === 'ready';
+    button.hidden = !ready;
+    button.disabled = ready && iAmReady;
+    button.textContent = iAmReady ? 'READY' : 'OK';
+  }
+}
+
+function clearChallenge() {
+  challengeId = '';
+  challengeBy = '';
+  challengePhase = '';
+  challengeLeft = 0;
+  challengeResult = '';
+  challengeRound = 0;
+  seenRound = 0;
+  resultsOpen = false;
+  iAmReady = false;
+  readyIds.clear();
+  winnerIds = [];
+  finalBoard = [];
+  lobbyPlayers = [];
+  lobbyReady = new Set();
+  soaked.clear();
+  syncChallengeOverlay();
+  paintChallenges();
+  paintChallengeHud();
+}
+
 function roomPanelHidden() {
   return !roomPanel || roomPanel.hidden;
+}
+
+function syncRoomPlay() {
+  const play = document.querySelector('#btn-room-play');
+  if (!play || !netRole || roomPanelHidden()) return;
+  if (netRole === 'guest') {
+    play.hidden = !started;
+    play.textContent = 'BACK TO THE STREET';
+    return;
+  }
+  play.hidden = false;
+  play.textContent = started ? 'BACK TO THE STREET' : 'START THE STREET';
 }
 
 function syncMainMenuButton() {
@@ -3306,6 +3912,13 @@ function publishNet(dt) {
       board: boardRows(),
       players: capturePlayers(),
       city,
+      challenge: challengeId,
+      phase: challengePhase,
+      left: Math.max(0, challengeLeft),
+      result: challengeResult,
+      round: challengeRound,
+      ready: [...readyIds],
+      winners: winnerIds,
     };
   } catch (error) {
     console.error(error);
@@ -3680,6 +4293,7 @@ function stepGuest(dt) {
   updateCamera(dt, torso);
   updateHud();
   popups.update(dt);
+  holdStreet();
 }
 
 function onNetMessage(data, peerId) {
@@ -3694,6 +4308,17 @@ function onNetMessage(data, peerId) {
         if (peer.doll) labelDoll(peer.doll, peer.name);
         broadcastRoster();
       }
+      return;
+    }
+    if (data.t === 'pick') {
+      const name = (peer && peer.name) || pendingNames.get(peerId) || 'Friend';
+      if (challengePhase === 'live' || challengePhase === 'ready' || challengePhase === 'count') return;
+      proposeChallenge(data.id, name);
+      return;
+    }
+    if (data.t === 'ready') {
+      if (Number(data.round) !== challengeRound) return;
+      acceptReady(peerId);
       return;
     }
     if (!peer) return;
@@ -3729,6 +4354,8 @@ function onNetMessage(data, peerId) {
     const mine = (data.people || []).find((person) => person.id && person.id === selfPeerId);
     if (mine && mine.name !== myName()) announceName();
     refreshNetBadge();
+  } else if (data.t === 'round') {
+    adoptChallenge(data);
   } else if (data.t === 'go') {
     hostPeerId = peerId;
     if (!started) launchLevel();
@@ -3739,6 +4366,7 @@ function onNetMessage(data, peerId) {
     }
   } else if (data.t === 'snap') {
     pendingSnap = data;
+    adoptChallenge(data);
     if (Array.isArray(data.board)) applyRemoteBoard(data.board);
     else if (typeof data.score === 'number') {
       score = data.score;
@@ -3783,6 +4411,8 @@ function onPeerJoin(peerId) {
   }
   broadcastRoster();
   if (started) netSend({ t: 'go' }, peerId);
+  judgeHarbor();
+  if (started && challengePhase) broadcastRound();
   renderFriends();
   if (ranksList) delete ranksList.dataset.sig;
   renderRanks();
@@ -3809,7 +4439,11 @@ function onPeerLeave(peerId) {
     peer.doll.dispose();
   }
   roster.delete(peerId);
+  readyIds.delete(peerId);
   syncActors();
+  judgeHarbor();
+  if (challengePhase === 'ready') settleReady();
+  else if (challengePhase) broadcastRound();
   broadcastRoster();
   renderFriends();
   if (ranksList) delete ranksList.dataset.sig;
@@ -3843,6 +4477,7 @@ async function leaveOnline() {
   streets.setViewerDrive(null);
   streets.setViewerOffer(false);
   refreshNetBadge();
+  clearChallenge();
   if (role === 'guest') {
     started = false;
     menuOpen = true;
@@ -3898,14 +4533,14 @@ async function openRoom(code, role) {
   document.querySelector('#room-code-line').hidden = false;
   document.querySelector('#room-host-tools').hidden = true;
   if (role === 'host') {
-    document.querySelector('#btn-room-play').hidden = false;
     setRoomStatus('Share this code. When your friends show up, start the street.');
     broadcastRoster();
   } else {
-    document.querySelector('#btn-room-play').hidden = true;
     setRoomStatus('Connected. Waiting for the host to start.');
     announceName();
   }
+  syncRoomPlay();
+  paintChallenges();
   refreshNetBadge();
 }
 
@@ -3917,6 +4552,15 @@ function startTogether() {
   sfx.ui();
 }
 
+document.querySelector('#challenge-ok').addEventListener('click', () => {
+  sfx.ui();
+  if (challengePhase === 'done') {
+    resultsOpen = false;
+    syncChallengeOverlay();
+    return;
+  }
+  sendReady();
+});
 document.querySelector('#btn-menu').addEventListener('click', () => {
   if (!started) return;
   openMenu();
@@ -3956,7 +4600,19 @@ document.querySelector('#net-badge').addEventListener('click', () => {
   void shareRoomCode();
   sfx.ui();
 });
-document.querySelector('#btn-room-play').addEventListener('click', startTogether);
+document.querySelector('#btn-challenge').addEventListener('click', () => {
+  if (!netRole || !started) return;
+  setChallengeOpen(!challengeOpen);
+  sfx.ui();
+});
+document.querySelector('#btn-room-play').addEventListener('click', () => {
+  if (netRole === 'guest') {
+    if (started) closeMenu();
+    sfx.ui();
+    return;
+  }
+  startTogether();
+});
 document.querySelector('#btn-room-leave').addEventListener('click', () => {
   void leaveOnline().then(() => {
     hideRoomPicker();

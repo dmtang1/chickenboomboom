@@ -50,6 +50,7 @@
         <div id="scoreboard">
           <div id="score-row"><span class="coin"></span><span id="score">0</span></div>
           <div id="combo">COMBO</div>
+          <div id="challenge-clock" hidden>1:00</div>
           <div id="drop" hidden>0 m</div>
           <div id="best">BEST 0</div>
           <div id="bests">
@@ -58,12 +59,21 @@
           </div>
         </div>
         <div id="ranks" hidden>
+          <p id="ranks-challenge" hidden></p>
           <ol id="ranks-list"></ol>
         </div>
       </div>
       <div id="controls">
         <button type="button" id="btn-menu" title="Menu (Esc)">MENU</button>
         <button type="button" id="btn-ranks" hidden title="Show or hide the room ranks (L)">RANKS</button>
+        <div id="challenge-menu">
+          <button type="button" id="btn-challenge" hidden aria-expanded="false" aria-controls="challenge-panel">CHALLENGE</button>
+          <div id="challenge-panel" hidden>
+            <p id="challenge-label" class="room-label">START A CHALLENGE</p>
+            <div id="challenge-list" role="group" aria-labelledby="challenge-label"></div>
+            <p id="challenge-note"></p>
+          </div>
+        </div>
         <button type="button" id="net-badge" hidden title="Copy or share the room code"></button>
         <button type="button" id="btn-toys" title="Drop a pile of toys (T)">TOYS</button>
         <div id="settings">
@@ -88,6 +98,17 @@
       </div>
       <div id="max-banner" hidden>MAX CHAOS!</div>
       <div id="callout" hidden></div>
+      <div id="challenge-overlay" hidden>
+        <div class="challenge-card">
+          <p id="challenge-kicker"></p>
+          <h2 id="challenge-title"></h2>
+          <p id="challenge-rules"></p>
+          <p id="challenge-count" hidden></p>
+          <ol id="challenge-scores" hidden></ol>
+          <p id="challenge-wait"></p>
+          <button type="button" id="challenge-ok">OK</button>
+        </div>
+      </div>
       <div id="friend-markers"></div>
       <div id="stick" aria-hidden="true"><div id="knob"></div></div>
       <button type="button" id="btn-nest" hidden title="Return to the nest (H)">NEST</button>
