@@ -511,11 +511,16 @@ export function createWeapons(scene, art) {
       for (const slot of slots.values()) slot.mesh.visible = on;
       for (const ghost of ghosts.values()) ghost.mesh.visible = on;
     },
+    conceal(key = LOCAL) {
+      const slot = slotOf(key);
+      if (slot) slot.mesh.visible = false;
+    },
     pose(hand, yaw, walking, key = LOCAL) {
       const slot = slotOf(key);
       if (!slot) return;
       const grip = frame(hand, yaw, walking, key);
       if (!grip) return;
+      slot.mesh.visible = true;
       slot.mesh.position.set(grip.x, grip.y, grip.z);
       slot.mesh.quaternion.copy(grip.quat);
     },

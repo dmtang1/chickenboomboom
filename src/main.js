@@ -107,8 +107,13 @@ let pendingSnap = null;
 let shownSnap = null;
 let guestJump = false;
 let guestDrop = false;
+let guestHold = '';
+let guestDrive = false;
+let guestNear = false;
+let guestLookX = 0;
 let sentSwing = false;
 let netAcc = 0;
+let lastPoseStamp = -1;
 let netBusy = false;
 let netPending = null;
 let inputAcc = 0;
@@ -491,6 +496,27 @@ flailBtn.addEventListener('pointerdown', (e) => {
 });
 flailBtn.addEventListener('pointerup', releaseFlail);
 flailBtn.addEventListener('pointercancel', releaseFlail);
+
+const dropBtn = document.querySelector('#btn-drop');
+dropBtn.addEventListener('pointerdown', (e) => {
+  if (blockDoubleTapZoom(e)) e.preventDefault();
+  e.stopPropagation();
+  tryDropWeapon();
+});
+
+function tryDropWeapon() {
+  if (!started || menuOpen || !streetLevel()) return;
+  if (netRole === 'guest') {
+    guestDrop = true;
+    return;
+  }
+  const dropped = streets.putDown();
+  if (!dropped) return;
+  callout('DOWN');
+  sfx.drop();
+  streetHint();
+}
+
 nestBtn.addEventListener('click', (e) => {
   e.preventDefault();
   e.stopPropagation();
@@ -625,17 +651,7 @@ window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
   if (e.code === 'KeyF' || e.code === 'KeyJ' || e.code === 'KeyK') tryFlail(null, true);
   if (e.code === 'KeyE' || e.code === 'Slash' || e.key === '?') trySwing(true);
-  if (e.code === 'KeyY' && streetLevel()) {
-    if (netRole === 'guest') guestDrop = true;
-    else {
-      const dropped = streets.putDown();
-      if (dropped) {
-        callout('DOWN');
-        sfx.drop();
-        streetHint();
-      }
-    }
-  }
+  if (e.code === 'KeyY') tryDropWeapon();
   if (e.code === 'Space') tryJump();
   if (e.code === 'KeyR') resetRagdoll();
   if (e.code === 'KeyH') tryNest();
@@ -1767,8 +1783,9 @@ function arrive(gate) {
 
 function streetHint() {
   const held = heldWeaponName();
+  const dropWord = touchDevice ? 'DROP lets go' : 'Y drops';
   let line = held
-    ? `${held} · E hits · Y drops · jump stands you back up`
+    ? `${held} · E hits · ${dropWord} · jump stands you back up`
     : 'Bright doors open · green EXIT lets you out · Space hops into a car · H nest';
   if (streets.driving()) {
     line = 'Driving · WASD steers · Space hops out · E honks · F boosts';
@@ -1812,7 +1829,7 @@ function onStreetEvent(e) {
   if (hear && e.honk) sfx.honk();
   if (hear && e.bawk) sfx.bawk();
   if (e.launch && (!e.who || e.who === ragdoll)) launchLock = Math.max(launchLock, e.launch);
-  if (netRole === 'host' && (e.callout || e.burst || e.honk || e.bawk || e.shake)) {
+  if (netRole === 'host' && !e.local && (e.callout || e.burst || e.honk || e.bawk || e.shake)) {
     netSend({
       t: 'fx',
       callout: e.callout || '',
@@ -2044,6 +2061,8 @@ function updateHud() {
   else if (streetLevel()) dropEl.textContent = `${streets.hits()} hits`;
   trapBanner.hidden = !trapped;
   trapFill.style.width = `${clamp(trapCharge / 8, 0, 1) * 100}%`;
+  const armed = started && !menuOpen && streetLevel() && !!heldWeaponName();
+  dropBtn.hidden = !(touchDevice && armed);
   updateComboHud();
 }
 
@@ -2562,13 +2581,15 @@ function wishVector(gp) {
   ix = clamp(ix + stickVec.x + (gp ? gp.x : 0), -1, 1);
   iy = clamp(iy + stickVec.y + (gp ? gp.y : 0), -1, 1);
   const mag = Math.hypot(ix, iy);
-  if (mag < 0.12) return { x: 0, z: 0 };
+  if (mag < 0.12) return { x: 0, z: 0, ix: 0, iy: 0 };
   const scale = Math.min(1, mag) / mag;
   const sx = ix * scale;
   const sy = iy * scale;
   return {
     x: Math.cos(yaw) * sx + Math.sin(yaw) * sy,
     z: -Math.sin(yaw) * sx + Math.cos(yaw) * sy,
+    ix: sx,
+    iy: sy,
   };
 }
 
@@ -2626,6 +2647,7 @@ function tryNest() {
 
 function dropAtNest(doll, slot) {
   if (!doll) return;
+  if (streetLevel()) streets.hopOutDoll(doll);
   const spot = streets.corner();
   doll.setWalker(true);
   doll.place(spot.x + slot * 1.15, doll.torso.spawn.y, spot.z);
@@ -2752,6 +2774,7 @@ function updateFriendMarkers() {
 
 function rescueMate(peer) {
   if (!peer.doll) return;
+  if (streetLevel()) streets.hopOutDoll(peer.doll);
   const spot = streets.respawn(ragdoll.mover().position);
   peer.doll.setWalker(true);
   peer.doll.place(spot.x + peer.slot * 0.8, peer.doll.torso.spawn.y, spot.z);
@@ -2764,11 +2787,28 @@ function driveRemotes() {
   for (const peer of roster.values()) {
     const doll = peer.doll;
     if (!doll) continue;
+    if (streets.drivingDoll(doll)) {
+      streets.pilotDoll(doll, clamp(-(peer.iy || 0), -1, 1), clamp(-(peer.ix || 0), -1, 1));
+      if (peer.swing && !peer.honked) streets.honkDoll(doll);
+      peer.honked = !!peer.swing;
+      if (peer.flail && now - peer.lastFlail > 70) {
+        peer.lastFlail = now;
+        streets.gooseDoll(doll);
+      }
+      if (peer.jump && now - peer.lastJump > 280) {
+        peer.lastJump = now;
+        streets.hopOutDoll(doll);
+      }
+      peer.jump = false;
+      continue;
+    }
+    peer.honked = false;
+    if (streets.custody(doll) === 'ride') continue;
     if (peer.swing && doll) streets.swingArm(doll);
     if (doll.isSupported(world)) peer.air = 2;
     if (peer.jump && now - peer.lastJump > 280) {
       peer.lastJump = now;
-      hopDoll(peer);
+      if (!streets.hopInDoll(doll)) hopDoll(peer);
     }
     peer.jump = false;
     if (!doll.walking()) {
@@ -2802,6 +2842,14 @@ function poseRemotes(dt) {
   for (const peer of roster.values()) {
     const doll = peer.doll;
     if (!doll || !doll.walking()) continue;
+    const seat = streetLevel() ? streets.seatOf(doll) : null;
+    if (seat) {
+      peer.faceYaw = seat.yaw;
+      peer.gait = Math.min(0.5, Math.abs(seat.speed) / 30);
+      peer.walkPhase = (peer.walkPhase || 0) + Math.abs(seat.speed) * 0.65 * dt;
+      doll.poseWalker(peer.faceYaw, peer.walkPhase || 0, peer.gait, dt, 0);
+      continue;
+    }
     const mover = doll.mover();
     const speed = Math.hypot(mover.velocity.x, mover.velocity.z);
     const grounded = doll.isSupported(world);
@@ -2817,6 +2865,23 @@ function poseRemotes(dt) {
     }
     doll.poseWalker(peer.faceYaw || 0, peer.walkPhase || 0, gait, dt, streetLevel() ? streets.chopOf(doll) : 0);
   }
+}
+
+function stampHold(pose, doll) {
+  if (!streetLevel() || !pose || !doll) return;
+  const phase = streets.custody(doll);
+  if (phase) pose.hold = phase;
+}
+
+function stampSeat(pose, doll) {
+  if (!streetLevel() || !pose || !doll) return;
+  const seat = streets.seatOf(doll);
+  if (seat) {
+    pose.drive = 1;
+    pose.spd = Math.round(seat.speed * 10) / 10;
+    return;
+  }
+  if (streets.nearCar(doll)) pose.near = 1;
 }
 
 function stampArm(pose, doll) {
@@ -2839,6 +2904,8 @@ function capturePlayers() {
     self.yaw = Math.round(faceYaw * 1000) / 1000;
   }
   stampArm(self, ragdoll);
+  stampHold(self, ragdoll);
+  stampSeat(self, ragdoll);
   players.push(self);
   for (const peer of roster.values()) {
     if (!peer.doll) continue;
@@ -2853,6 +2920,8 @@ function capturePlayers() {
       pose.yaw = Math.round((peer.faceYaw || pose.yaw || 0) * 1000) / 1000;
     }
     stampArm(pose, peer.doll);
+    stampHold(pose, peer.doll);
+    stampSeat(pose, peer.doll);
     players.push(pose);
   }
   return players;
@@ -2861,8 +2930,9 @@ function capturePlayers() {
 function publishNet(dt) {
   if (netRole !== 'host' || !started || !session) return;
   netAcc += dt;
-  if (netAcc < 1 / 20) return;
-  netAcc = 0;
+  const snap = 1 / 30;
+  if (netAcc < snap) return;
+  netAcc = Math.min(netAcc - snap, snap);
   let packet;
   try {
     const city = streetLevel() ? streets.capture() : null;
@@ -2901,8 +2971,179 @@ function flushNet(packet) {
   refreshNetBadge();
 }
 
-function applyPlayers(players, dt, hard) {
+function angDelta(from, to) {
+  let turn = to - from;
+  while (turn > Math.PI) turn -= Math.PI * 2;
+  while (turn < -Math.PI) turn += Math.PI * 2;
+  return turn;
+}
+
+function nlerpParts(from, to, u) {
+  const count = Math.min(from.length, to.length);
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const a = from[i];
+    const b = to[i];
+    if (!a || !b) continue;
+    let qx = b[3];
+    let qy = b[4];
+    let qz = b[5];
+    let qw = b[6];
+    if (a[3] * qx + a[4] * qy + a[5] * qz + a[6] * qw < 0) {
+      qx = -qx;
+      qy = -qy;
+      qz = -qz;
+      qw = -qw;
+    }
+    const nx = a[3] + (qx - a[3]) * u;
+    const ny = a[4] + (qy - a[4]) * u;
+    const nz = a[5] + (qz - a[5]) * u;
+    const nw = a[6] + (qw - a[6]) * u;
+    const len = Math.hypot(nx, ny, nz, nw) || 1;
+    out.push([
+      a[0] + (b[0] - a[0]) * u,
+      a[1] + (b[1] - a[1]) * u,
+      a[2] + (b[2] - a[2]) * u,
+      nx / len,
+      ny / len,
+      nz / len,
+      nw / len,
+    ]);
+  }
+  return out;
+}
+
+function poseBuffer(id) {
+  let buf = poseViews.get(id);
+  if (!buf) {
+    buf = { samples: [], vel: { x: 0, y: 0, z: 0 }, yawRate: 0, phaseRate: 0, partVel: null };
+    poseViews.set(id, buf);
+  }
+  return buf;
+}
+
+function pushPlayerSample(id, time, pose, hard) {
+  const buf = poseBuffer(id);
+  const samples = buf.samples;
+  if (hard) samples.length = 0;
+  const prev = samples.length ? samples[samples.length - 1] : null;
+  if (prev && time <= prev.t) return;
+  const walking = !!pose.w;
+  const sample = {
+    t: time,
+    w: walking ? 1 : 0,
+    x: pose.x || 0,
+    y: pose.y || 0,
+    z: pose.z || 0,
+    yaw: pose.yaw || 0,
+    phase: pose.phase || 0,
+    gait: pose.gait || 0,
+    chop: pose.chop || 0,
+    parts: pose.parts || null,
+  };
+  if (prev && prev.w === sample.w && prev.w) {
+    const dx = sample.x - prev.x;
+    const dy = sample.y - prev.y;
+    const dz = sample.z - prev.z;
+    if (dx * dx + dy * dy + dz * dz > 64) {
+      samples.length = 0;
+      buf.vel = { x: 0, y: 0, z: 0 };
+      buf.yawRate = 0;
+      buf.phaseRate = 0;
+    } else {
+      const span = Math.max(0.001, time - prev.t);
+      buf.vel = { x: dx / span, y: dy / span, z: dz / span };
+      buf.yawRate = angDelta(prev.yaw, sample.yaw) / span;
+      buf.phaseRate = (sample.phase - prev.phase) / span;
+      sample.yaw = prev.yaw + angDelta(prev.yaw, sample.yaw);
+    }
+  } else if (prev && prev.w === sample.w && sample.parts && prev.parts) {
+    const a = prev.parts[0];
+    const b = sample.parts[0];
+    const dx = a && b ? b[0] - a[0] : 0;
+    const dy = a && b ? b[1] - a[1] : 0;
+    const dz = a && b ? b[2] - a[2] : 0;
+    if (dx * dx + dy * dy + dz * dz > 64) {
+      samples.length = 0;
+      buf.partVel = null;
+    } else {
+      const span = Math.max(0.001, time - prev.t);
+      buf.partVel = sample.parts.map((row, i) => {
+        const before = prev.parts[i];
+        if (!before) return [0, 0, 0];
+        return [(row[0] - before[0]) / span, (row[1] - before[1]) / span, (row[2] - before[2]) / span];
+      });
+    }
+  } else if (prev) {
+    samples.length = 0;
+    buf.vel = { x: 0, y: 0, z: 0 };
+    buf.yawRate = 0;
+    buf.phaseRate = 0;
+    buf.partVel = null;
+  }
+  samples.push(sample);
+  if (samples.length > 8) samples.shift();
+}
+
+function samplePlayer(id, renderT) {
+  const buf = poseViews.get(id);
+  if (!buf || !buf.samples.length) return null;
+  const samples = buf.samples;
+  if (renderT == null) return samples[samples.length - 1];
+  while (samples.length >= 2 && samples[1].t <= renderT) samples.shift();
+  const a = samples[0];
+  if (samples.length < 2 || renderT <= a.t) {
+    const extra = samples.length < 2 ? Math.max(0, Math.min(0.08, renderT - a.t)) : 0;
+    return {
+      w: a.w,
+      x: a.x + buf.vel.x * extra,
+      y: a.y + buf.vel.y * extra,
+      z: a.z + buf.vel.z * extra,
+      yaw: a.yaw + buf.yawRate * extra,
+      phase: a.phase + buf.phaseRate * extra,
+      gait: a.gait,
+      chop: a.chop,
+      parts: shiftParts(a.parts, buf.partVel, extra),
+    };
+  }
+  const b = samples[1];
+  const span = Math.max(0.001, b.t - a.t);
+  const u = Math.min(1, (renderT - a.t) / span);
+  if (a.w && b.w) {
+    return {
+      w: 1,
+      x: a.x + (b.x - a.x) * u,
+      y: a.y + (b.y - a.y) * u,
+      z: a.z + (b.z - a.z) * u,
+      yaw: a.yaw + (b.yaw - a.yaw) * u,
+      phase: a.phase + (b.phase - a.phase) * u,
+      gait: a.gait + (b.gait - a.gait) * u,
+      chop: a.chop + (b.chop - a.chop) * u,
+      parts: null,
+    };
+  }
+  if (!a.w && !b.w && a.parts && b.parts) {
+    return { w: 0, parts: nlerpParts(a.parts, b.parts, u) };
+  }
+  return u < 0.5 ? a : b;
+}
+
+function shiftParts(parts, vel, extra) {
+  if (!parts || !vel || extra <= 0) return parts;
+  return parts.map((row, i) => {
+    const v = vel[i];
+    if (!v) return row;
+    return [row[0] + v[0] * extra, row[1] + v[1] * extra, row[2] + v[2] * extra, row[3], row[4], row[5], row[6]];
+  });
+}
+
+function applyPlayers(players, dt, hard, stamp) {
   const seen = new Set();
+  if (stamp != null && (hard || stamp < lastPoseStamp - 0.25)) {
+    for (const buf of poseViews.values()) buf.samples.length = 0;
+  }
+  if (stamp != null) lastPoseStamp = stamp;
+  const renderT = streets.renderTime();
   for (const pose of players || []) {
     if (!pose || !pose.id) continue;
     seen.add(pose.id);
@@ -2918,28 +3159,17 @@ function applyPlayers(players, dt, hard) {
     if (!doll) continue;
     if (pose.color) doll.recolor(pose.color);
     if (!mine && pose.name) labelDoll(doll, pose.name);
-    if (pose.w) {
-      let view = poseViews.get(pose.id);
-      if (!view || hard) view = { x: pose.x, y: pose.y, z: pose.z, yaw: pose.yaw || 0, phase: pose.phase || 0 };
-      else {
-        const blend = 1 - Math.exp(-14 * dt);
-        view.x += (pose.x - view.x) * blend;
-        view.y += (pose.y - view.y) * blend;
-        view.z += (pose.z - view.z) * blend;
-        view.phase += ((pose.phase || 0) - view.phase) * blend;
-        let turn = (pose.yaw || 0) - view.yaw;
-        while (turn > Math.PI) turn -= Math.PI * 2;
-        while (turn < -Math.PI) turn += Math.PI * 2;
-        view.yaw += turn * blend;
-      }
-      poseViews.set(pose.id, view);
+    if (stamp != null) pushPlayerSample(pose.id, stamp, pose, hard);
+    const view = samplePlayer(pose.id, renderT);
+    if (!view) continue;
+    if (view.w) {
       if (!doll.walking()) {
         doll.setWalker(true);
         if (streetLevel()) doll.mover().material = streets.walkerMaterial();
       }
       doll.plant(view.x, view.y, view.z);
-      doll.poseWalker(view.yaw, view.phase || 0, pose.gait || 0, dt, pose.chop || 0);
-    } else if (pose.parts) doll.applyParts(pose.parts);
+      doll.poseWalker(view.yaw, view.phase || 0, view.gait || 0, dt, view.chop || 0);
+    } else if (view.parts) doll.applyParts(view.parts);
   }
   for (const [id, doll] of guestDolls) {
     if (seen.has(id)) continue;
@@ -2981,18 +3211,22 @@ function sendInput(dt, gp) {
   const nest = guestNest;
   const drop = guestDrop;
   const swing = !menuOpen && streetLevel() && (swingHeld || gp.swing || keys.has('KeyE') || keys.has('Slash'));
-  if (!jump && !nest && !drop && swing === sentSwing && inputAcc < 1 / 15) return;
-  inputAcc = 0;
+  const inputStep = 1 / 30;
+  const inputDue = inputAcc >= inputStep;
+  if (!jump && !nest && !drop && swing === sentSwing && !inputDue) return;
+  inputAcc = inputDue ? Math.min(inputAcc - inputStep, inputStep) : 0;
   guestJump = false;
   guestNest = false;
   guestDrop = false;
   sentSwing = swing;
-  const wish = menuOpen ? { x: 0, z: 0 } : wishVector(gp);
+  const wish = menuOpen ? { x: 0, z: 0, ix: 0, iy: 0 } : wishVector(gp);
   const flail = !menuOpen && (flailHeld || keys.has('KeyF') || keys.has('KeyJ') || keys.has('KeyK') || gp.flail);
   netSend({
     t: 'in',
     x: Math.round(wish.x * 100) / 100,
     z: Math.round(wish.z * 100) / 100,
+    ix: Math.round((wish.ix || 0) * 100) / 100,
+    iy: Math.round((wish.iy || 0) * 100) / 100,
     f: flail ? 1 : 0,
     j: jump ? 1 : 0,
     n: nest ? 1 : 0,
@@ -3012,19 +3246,23 @@ function stepGuest(dt) {
     if (keys.has('ArrowRight')) lookX += 1;
     if (keys.has('ArrowUp')) lookY -= 1;
     if (keys.has('ArrowDown')) lookY += 1;
-    yaw -= clamp(lookX, -1, 1) * dt * 2.4;
+    guestLookX = clamp(lookX, -1, 1);
+    yaw -= guestLookX * dt * 2.4;
     pitch = clamp(pitch + clamp(lookY, -1, 1) * dt * 1.6, 0.2, 1.25);
     if (gp.jump && !gpJumpWas) guestJump = true;
     gpJumpWas = !!gp.jump;
   }
   sendInput(dt, gp);
   let hard = false;
+  let stamp = null;
   if (pendingSnap && started && streetLevel()) {
     if (pendingSnap !== shownSnap) {
       hard = !!streets.present(pendingSnap.city);
       shownSnap = pendingSnap;
+      const hostTime = streets.hostStamp();
+      if (hostTime >= 0) stamp = hostTime;
     }
-    applyPlayers(pendingSnap.players, dt, hard);
+    applyPlayers(pendingSnap.players, dt, hard, stamp);
     streets.wearPlayers(pendingSnap.players, (id) => (id === selfPeerId ? ragdoll : guestDolls.get(id)));
   } else streets.wearPlayers([], () => null);
   if (started && streetLevel()) {
@@ -3033,6 +3271,35 @@ function stepGuest(dt) {
     streets.sync();
   }
   syncDolls(simTime);
+  let hold = '';
+  let driving = false;
+  let near = false;
+  let speed = 0;
+  if (pendingSnap && pendingSnap.players) {
+    const mine = pendingSnap.players.find((person) => person.id === selfPeerId);
+    if (mine && mine.hold) hold = mine.hold;
+    driving = !!(mine && mine.drive);
+    near = !!(mine && mine.near);
+    speed = mine && mine.spd ? mine.spd : 0;
+  }
+  streets.setViewerHold(hold);
+  streets.setViewerDrive(driving ? { yaw: ragdoll.facing(), speed } : null);
+  streets.setViewerOffer(near && !driving);
+  if (!menuOpen && started && driving && Math.abs(guestLookX) < 0.15) {
+    const view = streets.driveView();
+    if (view) {
+      let behind = view.yaw + Math.PI - yaw;
+      while (behind > Math.PI) behind -= Math.PI * 2;
+      while (behind < -Math.PI) behind += Math.PI * 2;
+      yaw += behind * (1 - Math.exp(-2.4 * dt));
+    }
+  }
+  if (hold !== guestHold || driving !== guestDrive || near !== guestNear) {
+    guestHold = hold;
+    guestDrive = driving;
+    guestNear = near;
+    streetHint();
+  }
   const torso = ragdoll.torso.body;
   particles.update(dt);
   const height = torso.position.y - GROUND_Y;
@@ -3064,6 +3331,8 @@ function onNetMessage(data, peerId) {
     if (data.t === 'in') {
       peer.wishX = Number(data.x) || 0;
       peer.wishZ = Number(data.z) || 0;
+      peer.ix = Number(data.ix) || 0;
+      peer.iy = Number(data.iy) || 0;
       peer.flail = !!data.f;
       peer.swing = !!data.s;
       if (data.j) peer.jump = true;
@@ -3125,6 +3394,8 @@ function onPeerJoin(peerId) {
     doll: null,
     wishX: 0,
     wishZ: 0,
+    ix: 0,
+    iy: 0,
     jump: false,
     flail: false,
     swing: false,
@@ -3159,7 +3430,10 @@ function onPeerLeave(peerId) {
   const peer = roster.get(peerId);
   if (!peer) return;
   if (peer.doll) {
-    if (streetLevel()) streets.dropArm(peer.doll);
+    if (streetLevel()) {
+      streets.hopOutDoll(peer.doll);
+      streets.dropArm(peer.doll);
+    }
     peer.doll.dispose();
   }
   roster.delete(peerId);
@@ -3173,6 +3447,7 @@ async function leaveOnline() {
   netRole = null;
   hostPeerId = '';
   pendingSnap = null;
+  lastPoseStamp = -1;
   shownSnap = null;
   netPending = null;
   for (const peer of roster.values()) {
@@ -3190,6 +3465,8 @@ async function leaveOnline() {
   ragdoll.recolor(myColor);
   streets.setMirror(false);
   streets.setShared(false);
+  streets.setViewerDrive(null);
+  streets.setViewerOffer(false);
   refreshNetBadge();
   if (role === 'guest') {
     started = false;

@@ -516,6 +516,20 @@ button:focus-visible {
 
 #btn-jump.held { background: #fff6b0; }
 
+#btn-drop {
+  position: absolute;
+  right: 168px;
+  bottom: 142px;
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  padding: 0;
+  background: #d7c6ff;
+  color: var(--ink);
+  font-size: 15px;
+  letter-spacing: 0.06em;
+}
+
 #btn-flail {
   position: absolute;
   right: 22px;
@@ -754,5 +768,6 @@ h1 {
   #btn-nest { left: 22px; bottom: 132px; min-width: 76px; padding: 6px 8px; font-size: 14px; }
   #stick, #btn-flail { width: 104px; height: 104px; }
   #btn-jump { width: 80px; height: 80px; right: 138px; bottom: 30px; font-size: 14px; }
+  #btn-drop { width: 68px; height: 68px; right: 144px; bottom: 118px; font-size: 13px; }
   #max-banner { font-size: 46px; }
 }

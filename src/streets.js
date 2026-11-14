@@ -240,7 +240,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   const CAR_SNAP = 18;
   const ghostRoot = new THREE.Group();
   root.add(ghostRoot);
-  let toyGoals = [];
+  let toyMotions = [];
   let buildingKey = '';
   let ground = null;
   let shiftX = 0;
@@ -258,6 +258,11 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   let grace = 0;
   let bashCool = 0;
   let bust = null;
+  let hauls = [];
+  let suspects = [];
+  let viewerHold = '';
+  let viewerDrive = null;
+  let viewerOffer = false;
   let jail = null;
   let room = null;
   let parked = false;
@@ -2162,16 +2167,27 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function removeCar(car) {
     const riding = bust && bust.phase === 'ride' && bust.car === car;
-    const stolen = ride === car;
+    const extra = hauls.find((haul) => haul.phase === 'ride' && haul.car === car);
+    const driver = car.pilot;
     removeBody(car.body);
     car.mesh.removeFromParent();
     const index = cars.indexOf(car);
     if (index >= 0) cars.splice(index, 1);
-    if (stolen) {
-      ride = null;
-      if (ragdoll.walking()) freeMover();
+    if (driver) {
+      car.pilot = null;
+      car.driven = false;
+      if (ride === car) {
+        ride = null;
+        gas = 0;
+        wheel = 0;
+      }
+      if (driver.walking()) unpinDoll(driver);
     }
     if (riding) spill('BAIL!');
+    else if (extra) {
+      unpinDoll(extra.doll);
+      hauls = hauls.filter((haul) => haul !== extra);
+    }
   }
 
   function summonCrazy(x, z) {
@@ -2304,9 +2320,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     return Math.hypot(ox, oz);
   }
 
-  function closestCar(maxGap) {
-    if (!ragdoll.walking()) return null;
-    const spot = ragdoll.mover().position;
+  function closestCar(maxGap, doll) {
+    const who = doll || ragdoll;
+    if (!who.walking()) return null;
+    const spot = who.mover().position;
     let best = null;
     let bestGap = maxGap;
     for (const car of cars) {
@@ -2321,9 +2338,15 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     return best;
   }
 
-  function roofCar() {
-    if (!ragdoll.walking()) return null;
-    const spot = ragdoll.mover();
+  function pilotOf(doll) {
+    for (const car of cars) if (car.pilot === doll) return car;
+    return null;
+  }
+
+  function roofCar(doll) {
+    const who = doll || ragdoll;
+    if (!who.walking() || pilotOf(who)) return null;
+    const spot = who.mover();
     if (spot.velocity.y > 0.35) return null;
     for (const car of cars) {
       if (car.driven || car.pursuit) continue;
@@ -2540,7 +2563,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           if (!nose) continue;
           car.wallAt = car.wallAt || {};
           car.wallAt[prop.id] = now + 420;
-          crackBuilding(tile, prop, { x: nose.x, y: car.ride, z: nose.z }, power);
+          crackBuilding(tile, prop, { x: nose.x, y: car.ride, z: nose.z }, power, car.pilot || null);
           car.scrapeAt = now + 460;
           car.hop = Math.max(car.hop || 0, 0.22);
           continue;
@@ -2627,12 +2650,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     plantCar(car);
   }
 
-  function holdDriver() {
-    if (!ride) return;
-    const car = ride;
+  function holdPilot(doll, car) {
     const x = car.px + Math.sin(car.yaw) * car.kind.d * 0.06;
     const z = car.pz + Math.cos(car.yaw) * car.kind.d * 0.06;
-    const mover = ragdoll.mover();
+    const mover = doll.mover();
     mover.position.set(x, GROUND_Y + 0.72, z);
     mover.previousPosition.copy(mover.position);
     mover.velocity.set(0, 0, 0);
@@ -2640,19 +2661,18 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     mover.quaternion.set(0, 0, 0, 1);
   }
 
-  function buckle() {
-    const mover = ragdoll.mover();
-    mover.type = CANNON.Body.KINEMATIC;
-    mover.collisionResponse = false;
-    mover.collisionFilterMask = 0;
-    mover.mass = 0;
-    mover.updateMassProperties();
-    mover.velocity.set(0, 0, 0);
-    mover.angularVelocity.set(0, 0, 0);
-    return mover;
+  function holdDriver() {
+    for (const car of cars) {
+      if (car.driven && car.pilot) holdPilot(car.pilot, car);
+    }
   }
 
-  function claim(car) {
+  function buckle() {
+    return pinDoll(ragdoll);
+  }
+
+  function claimFor(doll, car) {
+    if (!doll || !car || car.driven || car.pursuit) return false;
     const pose = carPose(car);
     const vx = car.body.velocity.x;
     const vz = car.body.velocity.z;
@@ -2660,55 +2680,82 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.loose = false;
     car.driven = true;
     car.pursuit = false;
+    car.pilot = doll;
     car.px = pose.x;
     car.pz = pose.z;
     car.yaw = pose.yaw;
     car.speed = vx * Math.sin(pose.yaw) + vz * Math.cos(pose.yaw);
     car.boost = 0;
+    car.gas = 0;
+    car.wheel = 0;
     car.aimX = pose.x;
     car.aimZ = pose.z;
     car.passed = true;
     car.life = 0;
-    ride = car;
-    gas = 0;
-    wheel = 0;
-    offer = false;
-    if (!ragdoll.walking()) ragdoll.setWalker(true);
-    buckle();
-    holdDriver();
+    if (doll === ragdoll) {
+      ride = car;
+      gas = 0;
+      wheel = 0;
+      offer = false;
+    }
+    if (!doll.walking()) doll.setWalker(true);
+    pinDoll(doll);
+    holdPilot(doll, car);
     onEvent({
       callout: 'VROOM!',
       honk: true,
       bawk: true,
       shake: 0.1,
       hint: true,
+      who: doll === ragdoll ? undefined : doll,
       pos: { x: car.px, y: car.ride + car.kind.h * 0.4, z: car.pz },
     });
     return true;
   }
 
-  function releaseWheel() {
-    if (!ride) return null;
-    const car = ride;
+  function claim(car) {
+    return claimFor(ragdoll, car);
+  }
+
+  function releaseFor(doll) {
+    const car = pilotOf(doll);
+    if (!car) return null;
     car.driven = false;
     car.loose = true;
     car.rogue = true;
-    ride = null;
-    gas = 0;
-    wheel = 0;
+    car.pilot = null;
+    car.gas = 0;
+    car.wheel = 0;
+    if (ride === car) {
+      ride = null;
+      gas = 0;
+      wheel = 0;
+    }
     return car;
   }
 
-  function hopIn() {
-    if (ride || room || (bust && bust.phase) || !running) return false;
-    const car = closestCar(1.25);
-    if (!car) return false;
-    return claim(car);
+  function releaseWheel() {
+    return releaseFor(ragdoll);
   }
 
-  function hopOut() {
-    const car = releaseWheel();
-    if (!car) return null;
+  function hopInDoll(doll) {
+    if (!running || room || !doll) return false;
+    if (pilotOf(doll)) return false;
+    if (haulOf(doll)) return false;
+    if (doll === ragdoll && bust && bust.phase) return false;
+    const car = closestCar(1.25, doll);
+    if (!car) return false;
+    return claimFor(doll, car);
+  }
+
+  function hopIn() {
+    if (ride || (bust && bust.phase)) return false;
+    return hopInDoll(ragdoll);
+  }
+
+  function hopOutDoll(doll) {
+    const car = releaseFor(doll);
+    if (!car || !doll) return null;
     const boxes = solidBoxes();
     const door = car.kind.w / 2 + 0.9;
     let side = 1;
@@ -2723,9 +2770,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       x = car.px + Math.sin(car.yaw) * (car.kind.d / 2 + 0.9);
       z = car.pz + Math.cos(car.yaw) * (car.kind.d / 2 + 0.9);
     }
-    if (!ragdoll.walking()) ragdoll.setWalker(true);
-    ragdoll.place(x, ragdoll.torso.spawn.y, z);
-    const mover = freeMover();
+    if (!doll.walking()) doll.setWalker(true);
+    doll.place(x, doll.torso.spawn.y, z);
+    const mover = unpinDoll(doll);
     const out = side === 1 ? 1 : -1;
     mover.velocity.set(-Math.cos(car.yaw) * 3.4 * out, 5.4, Math.sin(car.yaw) * 3.4 * out);
     onEvent({
@@ -2733,9 +2780,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       bawk: true,
       hint: true,
       burst: 'feather',
+      who: doll === ragdoll ? undefined : doll,
       pos: { x, y: mover.position.y + 0.6, z },
     });
     return { yaw: car.yaw, x, z };
+  }
+
+  function hopOut() {
+    return hopOutDoll(ragdoll);
   }
 
   const CHASE_SPEED = 18;
@@ -2744,10 +2796,6 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   function policeKind() {
     for (const kind of KINDS) if (kind.id === 'police') return kind;
     return KINDS[0];
-  }
-
-  function jailStanding() {
-    return !!(jail && !jail.open);
   }
 
   function destroyJail() {
@@ -2784,6 +2832,84 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
   }
 
+  function jailAnchor() {
+    const block = CELL - ROAD;
+    return {
+      cx: shiftX + (CITY - 1) * CELL + ROAD + block * 0.5,
+      cz: shiftZ + ROAD + block * 0.5,
+    };
+  }
+
+  function parkJail() {
+    if (!jail) return;
+    const spot = jailAnchor();
+    shiftJail(spot.cx - jail.cx, spot.cz - jail.cz);
+  }
+
+  function haulOf(doll) {
+    if (doll === ragdoll && bust) return bust;
+    return hauls.find((haul) => haul.doll === doll) || null;
+  }
+
+  function cellMates() {
+    const mates = [];
+    if (bust && bust.phase === 'cell') mates.push(ragdoll);
+    for (const haul of hauls) if (haul.phase === 'cell') mates.push(haul.doll);
+    return mates;
+  }
+
+  function freeSuspects() {
+    return suspects.filter((doll) => !haulOf(doll));
+  }
+
+  function inmatesPresent() {
+    if (bust && (bust.phase === 'ride' || bust.phase === 'cell')) return true;
+    return hauls.some((haul) => haul.phase === 'ride' || haul.phase === 'cell');
+  }
+
+  function stillChasing() {
+    return suspects.some((doll) => {
+      const haul = haulOf(doll);
+      return !haul || haul.phase === 'ride';
+    });
+  }
+
+  function pinDoll(doll) {
+    if (!doll.walking()) doll.setWalker(true);
+    const mover = doll.mover();
+    mover.type = CANNON.Body.KINEMATIC;
+    mover.collisionResponse = false;
+    mover.collisionFilterMask = 0;
+    mover.mass = 0;
+    mover.updateMassProperties();
+    mover.velocity.set(0, 0, 0);
+    mover.angularVelocity.set(0, 0, 0);
+    return mover;
+  }
+
+  function unpinDoll(doll) {
+    const mover = doll.mover();
+    mover.type = CANNON.Body.DYNAMIC;
+    mover.collisionResponse = true;
+    mover.collisionFilterMask = GROUP_RAG | GROUP_PROP | GROUP_STATIC;
+    mover.mass = 8;
+    mover.updateMassProperties();
+    mover.wakeUp();
+    return mover;
+  }
+
+  function jailNeedsFix() {
+    if (!jail) return true;
+    if (jail.breached || jail.open) return true;
+    return jail.bars.some((bar) => bar.gone || bar.hits > 0);
+  }
+
+  function leaveCell() {
+    if (!(bust && bust.phase === 'cell')) return;
+    bust = null;
+    grace = 1.2;
+  }
+
   function buildJail(cx, cz) {
     destroyJail();
     const roomX = 4.8;
@@ -2815,7 +2941,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       });
       body.addShape(new CANNON.Box(new CANNON.Vec3(w / 2, h / 2, d / 2)));
       body.position.set(cx + x, y, cz + z);
-      body.gameRole = 'static';
+      body.gameRole = 'cell';
       addBody(body);
       bodies.push(body);
       return body;
@@ -2973,33 +3099,23 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     jail.loose.push({ id, body, mesh, cool: 0 });
   }
 
-  function pickLot(px, pz) {
-    const block = CELL - ROAD;
-    let best = null;
-    let bestD = -1;
-    for (const tile of tiles) {
-      const cx = shiftX + tile.gx * CELL + ROAD + block * 0.5;
-      const cz = shiftZ + tile.gz * CELL + ROAD + block * 0.5;
-      const d = Math.hypot(cx - px, cz - pz);
-      if (d < 20) continue;
-      if (d > bestD) {
-        bestD = d;
-        best = { cx, cz };
-      }
+  function prepareJail() {
+    if (jail && !jailNeedsFix()) {
+      parkJail();
+      return;
     }
-    if (best) return best;
-    const gx = Math.floor((px - shiftX) / CELL);
-    const gz = Math.floor((pz - shiftZ) / CELL);
-    return {
-      cx: shiftX + gx * CELL + ROAD + block * 0.5,
-      cz: shiftZ + gz * CELL + ROAD + block * 0.5,
-    };
+    const spot = jailAnchor();
+    buildJail(spot.cx, spot.cz);
   }
 
-  function ensureJail(x, z) {
-    if (jailStanding()) return;
-    const spot = pickLot(x, z);
-    buildJail(spot.cx, spot.cz);
+  function cellPoint(index, count) {
+    const n = Math.max(1, count);
+    const angle = (index / n) * Math.PI * 2 - Math.PI / 2;
+    const rad = Math.min(1.25, jail.inX * 0.42);
+    return {
+      x: jail.cx + Math.cos(angle) * rad,
+      z: jail.cz + Math.sin(angle) * rad * 0.85,
+    };
   }
 
   function barAt(bar) {
@@ -3058,20 +3174,29 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     jail.panels[side] = null;
   }
 
+  function outsideCell(doll) {
+    const spot = doll.mover().position;
+    return Math.abs(spot.x - jail.cx) >= jail.exitX || Math.abs(spot.z - jail.cz) >= jail.exitZ;
+  }
+
+  function freeHaul(doll) {
+    if (doll === ragdoll) bust = null;
+    else hauls = hauls.filter((haul) => haul.doll !== doll);
+  }
+
   function watchExit() {
-    if (!jail || !jail.breached || jail.open || !bust || bust.phase !== 'cell') return;
-    const spot = ragdoll.mover().position;
-    const dx = Math.abs(spot.x - jail.cx);
-    const dz = Math.abs(spot.z - jail.cz);
-    if (dx < jail.exitX && dz < jail.exitZ) return;
-    jail.open = true;
-    bust = null;
-    wanted = false;
-    onEvent({
-      callout: 'OUT!',
-      hint: true,
-      pos: { x: spot.x, y: spot.y + 0.8, z: spot.z },
-    });
+    if (!jail || !jail.breached || jail.open) return;
+    for (const doll of cellMates()) {
+      if (!outsideCell(doll)) continue;
+      const spot = doll.mover().position;
+      freeHaul(doll);
+      onEvent({
+        callout: 'OUT!',
+        hint: true,
+        who: doll,
+        pos: { x: spot.x, y: spot.y + 0.8, z: spot.z },
+      });
+    }
   }
 
   function hitBar(bar, pos) {
@@ -3129,11 +3254,12 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function rattleBars(dt) {
-    if (!jail || jail.open || !bust || bust.phase !== 'cell') return;
+    if (!jail || jail.open) return;
+    const mates = cellMates();
     for (const item of jail.loose) {
       item.cool = Math.max(0, item.cool - dt);
       const p = item.body.position;
-      if (item.cool <= 0 && !jail.breached) {
+      if (mates.length && item.cool <= 0 && !jail.breached) {
         const speed = Math.hypot(item.body.velocity.x, item.body.velocity.y, item.body.velocity.z);
         if (speed >= 3.2) {
           const bar = nearestBar(p.x, p.y, p.z, 1.25);
@@ -3146,12 +3272,15 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       containLoose(item);
     }
     jail.bash = Math.max(0, (jail.bash || 0) - dt);
-    if (jail.bash > 0 || jail.breached) return;
-    const mover = ragdoll.mover();
-    const bar = nearestBar(mover.position.x, mover.position.y, mover.position.z, 0.62);
-    if (!bar) return;
-    jail.bash = 0.42;
-    hitBar(bar, { x: mover.position.x, y: mover.position.y, z: mover.position.z });
+    if (jail.bash > 0 || jail.breached || !mates.length) return;
+    for (const doll of mates) {
+      const mover = doll.mover();
+      const bar = nearestBar(mover.position.x, mover.position.y, mover.position.z, 0.62);
+      if (!bar) continue;
+      jail.bash = 0.42;
+      hitBar(bar, { x: mover.position.x, y: mover.position.y, z: mover.position.z });
+      break;
+    }
   }
 
   function batter() {
@@ -3289,23 +3418,30 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.life = 0;
   }
 
-  function siren(x, z) {
-    if (!running || bust || wanted) return;
+  function siren(x, z, crew) {
+    if (!running || inmatesPresent() || wanted) return;
+    const list = [];
+    for (const doll of crew || []) {
+      if (doll && actors.includes(doll) && !list.includes(doll)) list.push(doll);
+    }
+    if (!list.length) return;
+    suspects = list;
     wanted = true;
     grace = 0;
+    prepareJail();
+    const carsNeeded = Math.max(4, list.length);
     let n = 0;
     for (const car of cars) {
       if (!car.kind.police || car.pursuit) continue;
       enlist(car);
       n += 1;
     }
-    while (n < 4) {
+    while (n < carsNeeded) {
       const angle = Math.random() * Math.PI * 2;
       const dist = 16 + Math.random() * 10;
       makePursuit(x + Math.sin(angle) * dist, z + Math.cos(angle) * dist, angle + Math.PI);
       n += 1;
     }
-    ensureJail(x, z);
     onEvent({
       callout: 'POLICE!',
       honk: true,
@@ -3344,39 +3480,44 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     });
   }
 
-  function arrest(car) {
-    if (bust || !car.pursuit || grace > 0) return;
-    releaseWheel();
-    ensureJail(car.px, car.pz);
-    if (!ragdoll.walking()) ragdoll.setWalker(true);
-    ragdoll.place(car.px, ragdoll.torso.spawn.y, car.pz);
-    const mover = ragdoll.mover();
-    mover.type = CANNON.Body.KINEMATIC;
-    mover.collisionResponse = false;
-    mover.collisionFilterMask = 0;
-    mover.mass = 0;
-    mover.updateMassProperties();
-    mover.velocity.set(0, 0, 0);
-    mover.angularVelocity.set(0, 0, 0);
-    bust = { car, phase: 'ride' };
+  function arrest(car, doll) {
+    if (!car.pursuit || !doll || haulOf(doll)) return;
+    if (doll === ragdoll && grace > 0) return;
+    if (doll === ragdoll) releaseWheel();
+    const mover = pinDoll(doll);
+    mover.position.set(car.px, GROUND_Y + 0.95, car.pz);
+    mover.previousPosition.copy(mover.position);
+    const haul = { doll, car, phase: 'ride' };
+    if (doll === ragdoll) bust = haul;
+    else hauls.push(haul);
+    car.haul = doll;
     onEvent({
       callout: 'BUSTED!',
       honk: true,
       bawk: true,
       shake: 0.32,
       hint: true,
+      who: doll,
       pos: { x: car.px, y: GROUND_Y + 1.6, z: car.pz },
     });
   }
 
   function tryGrab(car) {
-    if (!wanted || bust || grace > 0 || !car.pursuit) return;
-    const mover = ragdoll.mover();
-    const dx = mover.position.x - car.px;
-    const dz = mover.position.z - car.pz;
-    const dy = mover.position.y - car.ride;
-    if (dx * dx + dz * dz > 2.35 * 2.35 || Math.abs(dy) > 2.5) return;
-    arrest(car);
+    if (!wanted || !car.pursuit || car.haul) return;
+    let best = null;
+    let bestD = 2.35 * 2.35;
+    for (const doll of freeSuspects()) {
+      if (doll === ragdoll && grace > 0) continue;
+      const mover = doll.mover();
+      const dx = mover.position.x - car.px;
+      const dz = mover.position.z - car.pz;
+      const dy = mover.position.y - car.ride;
+      const d = dx * dx + dz * dz;
+      if (d > bestD || Math.abs(dy) > 2.5) continue;
+      bestD = d;
+      best = doll;
+    }
+    if (best) arrest(car, best);
   }
 
   function standDown() {
@@ -3385,29 +3526,33 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     for (const car of leaving) removeCar(car);
   }
 
-  function lockup() {
-    if (!bust || bust.phase !== 'ride' || !jail) return;
-    bust.phase = 'cell';
-    bust.car = null;
-    const mover = freeMover();
-    ragdoll.place(jail.cx, ragdoll.torso.spawn.y, jail.cz + 0.15);
+  function lockup(car) {
+    const doll = car && car.haul;
+    const haul = doll && haulOf(doll);
+    if (!haul || haul.phase !== 'ride' || !jail) return;
+    haul.phase = 'cell';
+    haul.car = null;
+    car.haul = null;
+    const index = Math.max(0, suspects.indexOf(doll));
+    const spot = cellPoint(index, suspects.length);
+    const mover = unpinDoll(doll);
+    doll.place(spot.x, doll.torso.spawn.y, spot.z);
     mover.velocity.set(0, 0, 0);
-    standDown();
+    if (!stillChasing()) standDown();
     onEvent({
       callout: 'JAIL!',
       shake: 0.28,
       honk: true,
       hint: true,
-      pos: { x: jail.cx, y: GROUND_Y + 1.4, z: jail.cz },
+      who: doll,
+      pos: { x: spot.x, y: GROUND_Y + 1.4, z: spot.z },
     });
   }
 
-  function holdInmate() {
-    if (!bust || bust.phase !== 'ride' || !bust.car) return;
-    const car = bust.car;
+  function holdOne(doll, car) {
     const x = car.px - Math.sin(car.yaw) * 0.15;
     const z = car.pz - Math.cos(car.yaw) * 0.15;
-    const mover = ragdoll.mover();
+    const mover = doll.mover();
     mover.position.set(x, GROUND_Y + 0.95, z);
     mover.previousPosition.copy(mover.position);
     mover.velocity.set(0, 0, 0);
@@ -3415,10 +3560,32 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     mover.quaternion.set(0, 0, 0, 1);
   }
 
+  function holdInmate() {
+    if (bust && bust.phase === 'ride' && bust.car) holdOne(ragdoll, bust.car);
+    for (const haul of hauls) {
+      if (haul.phase === 'ride' && haul.car) holdOne(haul.doll, haul.car);
+    }
+  }
+
+  function nearestFree(x, z) {
+    let best = null;
+    let bestD = Infinity;
+    for (const doll of freeSuspects()) {
+      const p = doll.mover().position;
+      const d = (p.x - x) ** 2 + (p.z - z) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = p;
+      }
+    }
+    return best;
+  }
+
   function pursuitGoal(car) {
-    const posted = grace > 0 || (bust && (bust.phase === 'ride' || bust.phase === 'cell'));
-    if (jail && posted) {
-      if (bust && bust.phase === 'ride' && car === bust.car) return { x: jail.gateX, z: jail.gateZ };
+    if (jail && car.haul) return { x: jail.gateX, z: jail.gateZ };
+    const free = nearestFree(car.px, car.pz);
+    if (free) return { x: free.x, z: free.z };
+    if (jail && (bust || hauls.length)) {
       const i = Math.max(0, cars.indexOf(car));
       const angle = i * 1.47 + 0.6;
       return { x: jail.cx + Math.sin(angle) * 8.5, z: jail.cz + Math.cos(angle) * 8.5 };
@@ -3439,7 +3606,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       const step = 3.2 * dt;
       car.yaw += Math.max(-step, Math.min(step, turn));
     }
-    const riding = bust && bust.phase === 'ride' && bust.car === car;
+    const riding = !!(car.haul && haulOf(car.haul) && haulOf(car.haul).phase === 'ride');
     const cruise = riding ? RIDE_SPEED : CHASE_SPEED;
     const arrive = riding ? 2.5 : 1.4;
     const speed = dist < arrive ? cruise * (dist / arrive) : cruise;
@@ -3454,7 +3621,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.body.velocity.set(Math.sin(car.yaw) * speed, 0, Math.cos(car.yaw) * speed);
     car.body.angularVelocity.set(0, 0, 0);
     car.body.wakeUp();
-    if (riding && dist < 2.7) lockup();
+    if (riding && dist < 2.7) lockup(car);
   }
 
   function blockTravel(axis, origin, index) {
@@ -3615,9 +3782,82 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     car.yaw = start.yaw;
   }
 
+  function joinDistance(car) {
+    const origin = car.turning && car.turn && car.turn.join ? car.turn : gateOrigin(car);
+    return wrapS(loopSFromPose(leftPose(origin, TURN_R, 1)));
+  }
+
+  function loopLeadGap(car) {
+    const { perim } = loopMetrics();
+    let best = perim;
+    let lead = null;
+    for (const other of cars) {
+      if (other === car || other.rogue || other.turning || !other.loop || other.slot !== car.slot) continue;
+      let ahead = loopAhead(car.s, other.s);
+      if (ahead < 0.001) {
+        if (other.id > car.id) continue;
+        ahead = 0;
+      }
+      if (ahead < best) {
+        best = ahead;
+        lead = other;
+      }
+    }
+    if (!lead) return perim;
+    return best - (car.kind.d + lead.kind.d) / 2;
+  }
+
+  function loosenLoop(car, dt) {
+    const gap = loopLeadGap(car);
+    if (gap >= 0.4) return;
+    car.s = wrapS(car.s - Math.min(dt * 5, 0.5 - gap));
+  }
+
+  function loopSpeed(car) {
+    const gap = loopLeadGap(car);
+    const follow = 4.4;
+    if (gap >= follow) return car.cruise;
+    if (gap <= 0.55) return 0;
+    return car.cruise * (gap - 0.55) / (follow - 0.55);
+  }
+
+  function canJoinLoop(car) {
+    const s = joinDistance(car);
+    const turnTime = (TURN_R * Math.PI / 2) / FLOW_SPEED;
+    const close = FLOW_SPEED * turnTime + 3.4;
+    for (const other of cars) {
+      if (other === car || other.rogue) continue;
+      if (other.turning && other.turn && other.turn.join) {
+        const os = joinDistance(other);
+        const need = (car.kind.d + other.kind.d) / 2 + 4.2;
+        if (loopAhead(s, os) < need || loopAhead(os, s) < need) return false;
+        continue;
+      }
+      if (!other.loop || other.turning || other.slot !== 1) continue;
+      const half = (car.kind.d + other.kind.d) / 2;
+      if (loopAhead(s, other.s) < half + 4.4) return false;
+      if (loopAhead(other.s, s) < half + close) return false;
+    }
+    return true;
+  }
+
+  function holdAtGate(car) {
+    const gate = stemGate(car).travel;
+    const hold = gate - car.dir * 1.2;
+    if ((car.travel - hold) * car.dir > 0) car.travel = hold;
+    car.speed = 0;
+    syncCar(car);
+    car.body.velocity.set(0, 0, 0);
+    car.body.angularVelocity.set(0, 0, 0);
+  }
+
   function approachLoop(car) {
     const remain = (stemGate(car).travel - car.travel) * car.dir;
     if (remain > 1.05) return false;
+    if (!canJoinLoop(car)) {
+      holdAtGate(car);
+      return true;
+    }
     beginJoin(car);
     return true;
   }
@@ -3783,7 +4023,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function driveLoop(car, dt) {
-    const speed = car.cruise;
+    loosenLoop(car, dt);
+    const speed = loopSpeed(car);
     const step = speed * dt;
     let next = car.s + step;
     const { perim } = loopMetrics();
@@ -4382,7 +4623,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     if (room || mirror) return;
     const water = GROUND_Y - WATER_DROP + 1.1;
     for (const doll of actors) {
-      if (doll === ragdoll && ride) continue;
+      if (pilotOf(doll)) continue;
       const body = doll.walking() ? doll.mover() : doll.torso.body;
       if (!body || body.position.y > water) continue;
       const spot = islandClamp(body.position.x, body.position.z, 2.4);
@@ -4425,6 +4666,13 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
 
   function clear() {
     running = false;
+    for (const car of cars) {
+      if (!car.pilot) continue;
+      const doll = car.pilot;
+      car.pilot = null;
+      car.driven = false;
+      if (doll.walking()) unpinDoll(doll);
+    }
     ride = null;
     if (ragdoll.walking()) freeMover();
     gas = 0;
@@ -4433,6 +4681,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     destroyRoom();
     if (parked) resumeCity();
     bust = null;
+    hauls = [];
+    suspects = [];
     wanted = false;
     grace = 0;
     bashCool = 0;
@@ -4499,6 +4749,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
     buildDistrict();
     spawnTraffic();
+    prepareJail();
     const spawn = {
       x: ROAD + WALK * 0.5,
       z: (CELL + ROAD) * 0.5,
@@ -4573,7 +4824,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function launchBird(doll, grip, power, part) {
-    if (doll === ragdoll && ride) hopOut();
+    if (pilotOf(doll)) hopOutDoll(doll);
     const at = birdCenter(doll);
     const word = part === 'head' ? 'BEAK!' : power.callout;
     hits += 1;
@@ -4900,7 +5151,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     tile.doors = tile.doors.filter((door) => door.id !== id);
   }
 
-  function collapseBuilding(tile, prop, hit, power = {}) {
+  function collapseBuilding(tile, prop, hit, power = {}, attacker = null) {
     const index = tile.props.indexOf(prop);
     if (index >= 0) tile.props.splice(index, 1);
     dropDoor(tile, prop.id);
@@ -4942,10 +5193,24 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       pos: { x: hit.x, y: prop.ly + prop.hy, z: hit.z },
       burst: 'chip',
     });
-    siren(hit.x, hit.z);
+    const crew = [];
+    if (prop.crew) {
+      for (const doll of prop.crew) {
+        if (actors.includes(doll) && !crew.includes(doll)) crew.push(doll);
+      }
+    }
+    if (attacker && !crew.includes(attacker)) crew.push(attacker);
+    siren(hit.x, hit.z, crew);
   }
 
-  function crackBuilding(tile, prop, hit, power = {}) {
+  function noteCrew(prop, doll) {
+    if (!prop || !doll) return;
+    if (!prop.crew) prop.crew = new Set();
+    prop.crew.add(doll);
+  }
+
+  function crackBuilding(tile, prop, hit, power = {}, attacker = null) {
+    noteCrew(prop, attacker);
     const blows = Math.max(1, power.cracks || 1);
     const originX = shiftX + tile.gx * CELL;
     const originZ = shiftZ + tile.gz * CELL;
@@ -5009,7 +5274,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         dropSlab(originX + fx, fy, originZ + fz, face, prop.color);
       }
       if (wallsBreached(prop) === 4) {
-        collapseBuilding(tile, prop, hit, power);
+        collapseBuilding(tile, prop, hit, power, attacker);
         return;
       }
     }
@@ -5188,8 +5453,10 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
   }
 
   function slash() {
-    if (bust && bust.phase === 'ride') return;
-    for (const doll of actors) swingAt(doll);
+    for (const doll of actors) {
+      if (haulOf(doll)?.phase === 'ride') continue;
+      swingAt(doll);
+    }
   }
 
   function swingAt(attacker) {
@@ -5265,7 +5532,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         struck.push({ tile, prop, ...hit });
       }
     }
-    if (jail && !jail.open && grip && attacker === ragdoll) {
+    if (jail && !jail.open && grip && haulOf(attacker)?.phase === 'cell') {
       const aim = { x: grip.dx, y: grip.dy, z: grip.dz };
       for (const ray of rays) {
         for (let t = 0.25; t <= 1; t += 0.25) {
@@ -5334,7 +5601,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
             struck.push({ tile, prop, x: at.x, y: at.y, z: at.z });
           }
         }
-        if (jail && !jail.open && attacker === ragdoll) shoveLoose(origin.x, origin.y, origin.z, null, power, power.blast, key);
+        if (jail && !jail.open && haulOf(attacker)?.phase === 'cell') shoveLoose(origin.x, origin.y, origin.z, null, power, power.blast, key);
       }
     }
 
@@ -5415,7 +5682,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       else explodeCar(car, power);
     }
     for (const blow of struck) {
-      if (blow.prop.kind === 'building') crackBuilding(blow.tile, blow.prop, blow, power);
+      if (blow.prop.kind === 'building') crackBuilding(blow.tile, blow.prop, blow, power, attacker);
       else topple(blow.tile, blow.prop, grip, power);
     }
     for (const blow of bruised) launchBird(blow.doll, grip, power, blow.part);
@@ -5543,6 +5810,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     }
     room.root.removeFromParent();
     room = null;
+    toyMotions = [];
   }
 
   function roomSolid(w, h, d, x, y, z, meshMat, physMat) {
@@ -5859,16 +6127,9 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     });
     return color;
   }
-  function goalOf(ghost, x, y, z, qx, qy, qz, qw) {
-    ghost.goal.set(x, y, z);
-    ghost.goalQ.set(qx, qy, qz, qw);
-  }
   function freshGhost(mesh) {
     const ghost = {
       mesh,
-      goal: new THREE.Vector3(),
-      goalQ: new THREE.Quaternion(),
-      goalSpin: 0,
       spin: 0,
       samples: [],
       vel: new THREE.Vector3(),
@@ -5883,6 +6144,8 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     if (hostOffset == null || time < lastHostStamp - 0.25) {
       hostOffset = time - local;
       for (const ghost of carGhosts.values()) ghost.samples.length = 0;
+      for (const ghost of junkGhosts.values()) ghost.samples.length = 0;
+      for (const motion of toyMotions) motion.samples.length = 0;
     } else {
       const delta = time - local - hostOffset;
       hostOffset += delta * (delta > 0 ? 0.35 : 0.05);
@@ -5982,7 +6245,33 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       for (const tile of tiles) syncTile(tile);
     }
     syncDistrict();
+    parkJail();
     return changed;
+  }
+  function applyCell(cell) {
+    if (!jail) {
+      const spot = jailAnchor();
+      buildJail(spot.cx, spot.cz);
+    } else parkJail();
+    if (!cell || !jail) return;
+    const mask = cell.b || '';
+    const fresh = !cell.k && !mask.includes('1');
+    const dirty = jail.breached || jail.bars.some((bar) => bar.gone || bar.hits > 0);
+    if (fresh && dirty) {
+      const spot = jailAnchor();
+      buildJail(spot.cx, spot.cz);
+      return;
+    }
+    if (mask.length !== jail.bars.length) return;
+    for (let i = 0; i < mask.length; i++) {
+      if (mask[i] === '1' && !jail.bars[i].gone) dropBar(jail.bars[i]);
+    }
+    if (cell.k) {
+      for (const side of ['south', 'east', 'west']) {
+        if (gapOpen(side)) openPanel(side);
+      }
+      jail.breached = true;
+    }
   }
   function applyBuildings(ids) {
     if (!ids) return;
@@ -5995,8 +6284,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
     }
   }
-  function applyCars(list, time) {
-    const stamp = noteCarClock(time);
+  function applyCars(list, stamp) {
     const seen = new Set();
     for (const row of list || []) {
       const [id, kindId, color, x, y, z, qx, qy, qz, qw, spin] = row;
@@ -6015,7 +6303,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       carGhosts.delete(id);
     }
   }
-  function applyJunk(list, hard) {
+  function applyJunk(list, hard, stamp) {
     const seen = new Set();
     for (const row of list || []) {
       const [id, x, y, z, qx, qy, qz, qw, sx, sy, sz, color] = row;
@@ -6026,18 +6314,15 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         mesh.castShadow = true;
         ghost = freshGhost(mesh);
         junkGhosts.set(id, ghost);
-        goalOf(ghost, x, y, z, qx, qy, qz, qw);
-        ghost.mesh.position.copy(ghost.goal);
-        ghost.mesh.quaternion.copy(ghost.goalQ);
-      } else {
-        goalOf(ghost, x, y, z, qx, qy, qz, qw);
-        if (ghost.mesh.material.color.getHex() !== color) ghost.mesh.material = paintOf(color || 0xffd84a);
-        const jump = ghost.mesh.position.distanceToSquared(ghost.goal);
-        if (hard || jump > 36) {
-          ghost.mesh.position.copy(ghost.goal);
-          ghost.mesh.quaternion.copy(ghost.goalQ);
-        }
+      } else if (ghost.mesh.material.color.getHex() !== color) {
+        ghost.mesh.material = paintOf(color || 0xffd84a);
       }
+      if (hard) {
+        ghost.samples.length = 0;
+        ghost.vel.set(0, 0, 0);
+        ghost.spinRate = 0;
+      }
+      pushCarSample(ghost, stamp, x, y, z, qx, qy, qz, qw, 0);
       ghost.mesh.scale.set(sx || 1, sy || 1, sz || 1);
     }
     for (const [id, ghost] of junkGhosts) {
@@ -6046,7 +6331,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       junkGhosts.delete(id);
     }
   }
-  function applyRoom(inside, back, toys, hard) {
+  function applyRoom(inside, back, toys, hard, stamp) {
     if (inside && !room) {
       suspendCity();
       buildRoom(back || { x: 0, z: 0, yaw: 0 });
@@ -6056,19 +6341,26 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       resumeCity();
       hard = true;
     }
-    toyGoals = [];
+    if (!room) toyMotions = [];
     if (room && toys && toys.length === room.toys.length) {
+      if (toyMotions.length !== toys.length) {
+        toyMotions = room.toys.map((toy) => ({
+          mesh: toy.mesh,
+          samples: [],
+          vel: new THREE.Vector3(),
+          spinRate: 0,
+          spin: 0,
+        }));
+      }
       for (let i = 0; i < toys.length; i++) {
         const row = toys[i];
-        const goal = {
-          p: new THREE.Vector3(row[0], row[1], row[2]),
-          q: new THREE.Quaternion(row[3], row[4], row[5], row[6]),
-        };
-        toyGoals.push(goal);
+        const motion = toyMotions[i];
         if (hard) {
-          room.toys[i].mesh.position.copy(goal.p);
-          room.toys[i].mesh.quaternion.copy(goal.q);
+          motion.samples.length = 0;
+          motion.vel.set(0, 0, 0);
+          motion.spinRate = 0;
         }
+        pushCarSample(motion, stamp, row[0], row[1], row[2], row[3], row[4], row[5], row[6], 0);
       }
     }
     if (mirror && room) {
@@ -6116,38 +6408,75 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     },
     swingArm(doll) {
       if (!running || mirror || !doll) return false;
-      if (doll === ragdoll && ride) return false;
+      if (pilotOf(doll)) return false;
       if (bust && bust.phase === 'ride') return false;
       return weapons.startSwing(armKey(doll));
     },
     bounce,
     batter,
-    driving: () => !!ride,
-    canHopIn: () => offer,
+    driving: () => !!ride || !!viewerDrive,
+    drivingDoll: (doll) => !!pilotOf(doll),
+    nearCar: (doll) => {
+      if (!doll || !doll.walking() || pilotOf(doll) || haulOf(doll)) return false;
+      if (doll === ragdoll && bust && bust.phase) return false;
+      return !!closestCar(1.25, doll);
+    },
+    seatOf(doll) {
+      const car = pilotOf(doll);
+      if (!car) return null;
+      return { yaw: car.yaw, speed: car.speed };
+    },
+    canHopIn: () => offer || viewerOffer,
     hopIn,
     hopOut,
+    hopInDoll,
+    hopOutDoll,
     pilot(nextGas, nextWheel) {
       gas = Math.max(-1, Math.min(1, nextGas || 0));
       wheel = Math.max(-1, Math.min(1, nextWheel || 0));
+      if (ride) {
+        ride.gas = gas;
+        ride.wheel = wheel;
+      }
+    },
+    pilotDoll(doll, nextGas, nextWheel) {
+      const car = pilotOf(doll);
+      if (!car || car === ride) return;
+      car.gas = Math.max(-1, Math.min(1, nextGas || 0));
+      car.wheel = Math.max(-1, Math.min(1, nextWheel || 0));
     },
     honk() {
-      if (!ride) return false;
-      if (performance.now() < ride.honkAt) return false;
-      ride.honkAt = performance.now() + 260;
-      onEvent({ honk: true });
-      return true;
+      return this.honkDoll(ragdoll);
     },
     goose() {
-      if (!ride) return;
-      ride.boost = Math.min(1.2, (ride.boost || 0) + 0.38);
-      if (performance.now() >= ride.honkAt) {
-        ride.honkAt = performance.now() + 180;
-        onEvent({ honk: true });
+      this.gooseDoll(ragdoll);
+    },
+    honkDoll(doll) {
+      const car = pilotOf(doll);
+      if (!car) return false;
+      if (performance.now() < car.honkAt) return false;
+      car.honkAt = performance.now() + 260;
+      onEvent({ honk: true, who: doll === ragdoll ? undefined : doll });
+      return true;
+    },
+    gooseDoll(doll) {
+      const car = pilotOf(doll);
+      if (!car) return;
+      car.boost = Math.min(1.2, (car.boost || 0) + 0.38);
+      if (performance.now() >= car.honkAt) {
+        car.honkAt = performance.now() + 180;
+        onEvent({ honk: true, who: doll === ragdoll ? undefined : doll });
       }
     },
     driveView() {
-      if (!ride) return null;
-      return { yaw: ride.yaw, speed: ride.speed, x: ride.px, z: ride.pz };
+      if (ride) return { yaw: ride.yaw, speed: ride.speed, x: ride.px, z: ride.pz };
+      return viewerDrive;
+    },
+    setViewerDrive(view) {
+      viewerDrive = view && view.yaw != null ? { yaw: view.yaw, speed: view.speed || 0 } : null;
+    },
+    setViewerOffer(on) {
+      viewerOffer = !!on;
     },
     locked: () => !!(bust && bust.phase === 'ride'),
     rideYaw() {
@@ -6158,11 +6487,20 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (!running) return '';
       if (bust && bust.phase === 'ride') return 'ride';
       if (bust && bust.phase === 'cell') return 'cell';
-      if (wanted) return 'wanted';
+      if (viewerHold === 'ride' || viewerHold === 'cell') return viewerHold;
+      if (wanted && suspects.includes(ragdoll) && !bust) return 'wanted';
       return '';
     },
+    custody(doll) {
+      const haul = haulOf(doll || ragdoll);
+      return haul ? haul.phase : '';
+    },
+    setViewerHold(phase) {
+      viewerHold = phase || '';
+    },
     cellFrame() {
-      if (!running || !bust || bust.phase !== 'cell' || !jail || jail.open) return null;
+      const inside = (bust && bust.phase === 'cell') || viewerHold === 'cell';
+      if (!running || !inside || !jail || jail.open) return null;
       const mover = ragdoll.mover();
       return {
         x: mover.position.x,
@@ -6195,7 +6533,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (ride) hopOut();
       if (bust && bust.phase === 'ride') return false;
       if (bust && bust.phase === 'cell') {
-        bust = null;
+        leaveCell();
         grace = 1.2;
       }
       return true;
@@ -6210,7 +6548,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
         pendingGate = null;
       }
       if (bust && bust.phase === 'cell') {
-        bust = null;
+        leaveCell();
         grace = 1.2;
       }
       return true;
@@ -6264,7 +6602,7 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       if (!running || room) return;
       for (const car of cars) {
         if (car.driven) {
-          roll(car, dt, gas, wheel, false);
+          roll(car, dt, car.gas || 0, car.wheel || 0, false);
           continue;
         }
         if (car.loose) {
@@ -6305,15 +6643,19 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
     post(dt, torso) {
       if (!running || !torso) return null;
       if (room) return stepRoom(dt);
-      if (ride && !ragdoll.walking()) releaseWheel();
-      if (!ride && ragdoll.walking() && !(bust && bust.phase)) {
-        const landed = roofCar();
-        if (landed) claim(landed);
+      for (const car of cars) {
+        if (car.pilot && !car.pilot.walking()) releaseFor(car.pilot);
+      }
+      for (const doll of actors) {
+        if (!doll.walking() || pilotOf(doll) || haulOf(doll)) continue;
+        if (doll === ragdoll && bust && bust.phase) continue;
+        const landed = roofCar(doll);
+        if (landed) claimFor(doll, landed);
       }
       const pickedFor = [];
       for (const doll of actors) {
         if (!doll.walking()) continue;
-        if (doll === ragdoll && ride) continue;
+        if (pilotOf(doll)) continue;
         const body = doll.mover();
         const picked = weapons.tryPickup(body.position.x, body.position.z, armKey(doll));
         if (picked) pickedFor.push({ doll, picked, body });
@@ -6382,13 +6724,14 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
       }
       for (const car of gone) removeCar(car);
       grace = Math.max(0, grace - dt);
-      if (wanted && !bust) {
+      if (wanted) {
         for (const car of cars) tryGrab(car);
       }
       rattleBars(dt);
       watchExit();
-      if (wanted && !bust && grace <= 0 && !cars.some((car) => car.pursuit)) {
+      if (wanted && grace <= 0 && freeSuspects().length && !cars.some((car) => car.pursuit)) {
         wanted = false;
+        suspects = [];
         onEvent({ callout: 'LOST THEM!', hint: true, pos: { x: torso.position.x, y: torso.position.y + 1.4, z: torso.position.z } });
       }
       untangle();
@@ -6598,37 +6941,36 @@ export function createStreets({ world, scene, art, ragdoll, groundMat, ragMat, t
           round3(toy.body.quaternion.w),
         ]) : null,
         hits,
+        cell: jail ? {
+          b: jail.bars.map((bar) => (bar.gone ? '1' : '0')).join(''),
+          k: jail.breached ? 1 : 0,
+        } : null,
       };
     },
     present(city) {
       if (!city || !mirror) return false;
+      const stamp = noteCarClock(city.time);
       const hard = applyLayout(city.sx || 0, city.sz || 0, city.tiles);
       applyBuildings(city.buildings);
-      applyCars(city.cars, city.time);
-      applyJunk(city.junk, hard);
+      applyCars(city.cars, stamp);
+      applyJunk(city.junk, hard, stamp);
       weapons.show(city.drops || []);
-      applyRoom(!!city.inside, city.back, city.toys, hard);
+      applyRoom(!!city.inside, city.back, city.toys, hard, stamp);
+      applyCell(city.cell);
       if (typeof city.hits === 'number') hits = city.hits;
       return hard;
     },
-    glide(dt) {
+    hostStamp: () => lastHostStamp,
+    renderTime() {
+      if (hostOffset == null) return null;
+      return performance.now() * 0.001 + hostOffset - CAR_DELAY;
+    },
+    glide() {
       if (!mirror) return;
-      const k = 1 - Math.exp(-12 * dt);
       const now = performance.now() * 0.001;
       for (const ghost of carGhosts.values()) poseCarGhost(ghost, now);
-      for (const ghost of junkGhosts.values()) {
-        ghost.mesh.position.lerp(ghost.goal, k);
-        ghost.mesh.quaternion.slerp(ghost.goalQ, k);
-      }
-      if (room) {
-        for (let i = 0; i < toyGoals.length; i++) {
-          const toy = room.toys[i];
-          const goal = toyGoals[i];
-          if (!toy || !goal) continue;
-          toy.mesh.position.lerp(goal.p, k);
-          toy.mesh.quaternion.slerp(goal.q, k);
-        }
-      }
+      for (const ghost of junkGhosts.values()) poseCarGhost(ghost, now);
+      for (const motion of toyMotions) poseCarGhost(motion, now);
     },
   };
 }
