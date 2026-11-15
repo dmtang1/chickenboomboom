@@ -5,7 +5,7 @@ import { createArt } from './art.js';
 import { createAudio } from './audio.js';
 import { createParticles } from './particles.js';
 import { createProps } from './props.js';
-import { connectRoom } from './net.js';
+import { connectRoom, decodeSnap, encodeSnap } from './net.js';
 import { createRagdoll } from './ragdoll.js';
 import { createStairs } from './stairs.js';
 import { createStreets } from './streets.js';
@@ -163,10 +163,19 @@ let guestNear = false;
 let guestLookX = 0;
 let sentSwing = false;
 let netAcc = 0;
+let metaAcc = 0;
+let lastFullAt = 0;
+let sentSig = '';
+let sigAt = 0;
 let lastPoseStamp = -1;
 let netBusy = false;
 let netPending = null;
 let inputAcc = 0;
+let guestLag = 0.08;
+let leadX = 0;
+let leadZ = 0;
+const sentCars = new Map();
+const sentJunk = new Map();
 let localGait = 0;
 let menuOpen = true;
 let nextMark = 50;
@@ -2824,11 +2833,10 @@ function challengeClockText(challenge) {
 
 function challengePlayers() {
   const rows = [{ id: myId(), userId: selfUserId, name: myName() }];
-  if (netRole === 'host') {
-    for (const peer of roster.values()) {
-      if (!peer.id || peer.id === myId()) continue;
-      rows.push({ id: peer.id, userId: peer.userId || '', name: peer.name || 'Chicken' });
-    }
+  if (netRole !== 'host') return rows;
+  for (const peer of roster.values()) {
+    if (!peer.id || peer.id === myId() || (!peer.heard && !peer.ready)) continue;
+    rows.push({ id: peer.id, userId: peer.userId || '', name: peer.name || 'Chicken' });
   }
   return rows;
 }
@@ -3049,6 +3057,7 @@ function proposeChallenge(id, byName) {
   readyIds.clear();
   iAmReady = false;
   readyAcc = 0;
+  for (const peer of roster.values()) peer.ready = false;
   resultsOpen = false;
   setChallengeOpen(false);
   if (started) closeMenu();
@@ -3058,10 +3067,9 @@ function proposeChallenge(id, byName) {
 
 function settleReady() {
   if (netRole !== 'host' || challengePhase !== 'ready') return;
+  if (iAmReady) readyIds.add(myId());
+  for (const peer of roster.values()) if (peer.ready) readyIds.add(peer.id);
   const players = challengePlayers();
-  for (const id of [...readyIds]) {
-    if (!players.some((player) => player.id === id)) readyIds.delete(id);
-  }
   if (players.length && players.every((player) => readyIds.has(player.id))) {
     challengePhase = 'count';
     syncClock(3);
@@ -3072,23 +3080,35 @@ function settleReady() {
   broadcastRound();
 }
 
+function peerFromSignal(peerId, claimedId, userId) {
+  if (peerId && roster.has(peerId)) return roster.get(peerId);
+  if (claimedId && roster.has(claimedId)) return roster.get(claimedId);
+  if (userId) {
+    const hits = [...roster.values()].filter((peer) => peer.userId && peer.userId === userId);
+    if (hits.length === 1) return hits[0];
+  }
+  const pending = [...roster.values()].filter((peer) => peer.heard && !peer.ready);
+  if (pending.length === 1) return pending[0];
+  return null;
+}
+
+function markPeerReady(peer) {
+  if (!peer || challengePhase !== 'ready') return;
+  peer.heard = true;
+  if (peer.ready) return;
+  peer.ready = true;
+  readyIds.add(peer.id);
+  settleReady();
+}
+
 function acceptReady(id, userId) {
-  if (netRole !== 'host' || challengePhase !== 'ready') return;
-  const players = challengePlayers();
-  let match = players.find((player) => player.id === id);
-  if (!match && userId) {
-    const hits = players.filter((player) => player.userId && player.userId === userId);
-    if (hits.length === 1) match = hits[0];
+  if (id === myId()) {
+    iAmReady = true;
+    readyIds.add(myId());
+    settleReady();
+    return;
   }
-  if (!match && id && id !== myId()) {
-    const pending = players.filter((player) => player.id !== myId() && !readyIds.has(player.id));
-    if (pending.length === 1) match = pending[0];
-  }
-  if (!match) return;
-  const added = !readyIds.has(match.id);
-  readyIds.add(match.id);
-  if (added) settleReady();
-  else broadcastRound();
+  markPeerReady(peerFromSignal(id, id, userId));
 }
 
 function sendReady() {
@@ -3171,10 +3191,7 @@ function holdStreet() {
 
 function tickChallenge() {
   if (netRole !== 'host' || !started) return;
-  if (challengePhase === 'ready') {
-    if (iAmReady && !readyIds.has(myId())) acceptReady(myId(), selfUserId);
-    return;
-  }
+  if (challengePhase === 'ready') return;
   if (challengePhase === 'count') {
     const shown = Math.ceil(challengeLeft);
     const left = clockLeft();
@@ -3239,7 +3256,6 @@ function adoptChallenge(data) {
   }
   if (round && round === challengeRound && phaseRank(phase) < phaseRank(challengePhase)) return;
   const prev = challengePhase;
-  const prevRound = challengeRound;
   if (round) {
     seenRound = round;
     challengeRound = round;
@@ -3250,7 +3266,7 @@ function adoptChallenge(data) {
   challengePhase = phase;
   setChallengeOpen(false);
   if (started && (phase === 'ready' || phase === 'count' || phase === 'live' || phase === 'done')) closeMenu();
-  if (phase === 'ready' && (prev !== 'ready' || round !== prevRound)) {
+  if (phase === 'ready' && prev !== 'ready') {
     iAmReady = false;
     readyAcc = 0;
     resultsOpen = false;
@@ -3959,62 +3975,184 @@ function capturePlayers() {
     stampHold(pose, peer.doll);
     stampSeat(pose, peer.doll);
     stampRoom(pose, peer.doll);
+    if (peer.echo) pose.echo = peer.echo;
     players.push(pose);
   }
   return players;
 }
 
-function publishNet(dt) {
-  if (netRole !== 'host' || !started || !session) return;
-  netAcc += dt;
-  const snap = 1 / 30;
-  if (netAcc < snap) return;
-  netAcc = Math.min(netAcc - snap, snap);
-  let packet;
+function rowKey(row) {
+  let key = '';
+  for (let i = 1; i < row.length; i++) {
+    const value = row[i];
+    key += typeof value === 'number' ? Math.round(value * 100) : value;
+    key += ',';
+  }
+  return key;
+}
+
+function thinList(rows, sent, full) {
+  const live = new Set();
+  const changed = [];
+  const gone = [];
+  for (const row of rows || []) {
+    const id = row[0];
+    live.add(id);
+    const key = rowKey(row);
+    if (full || sent.get(id) !== key) {
+      sent.set(id, key);
+      changed.push(row);
+    }
+  }
+  for (const id of sent.keys()) {
+    if (live.has(id)) continue;
+    sent.delete(id);
+    gone.push(id);
+  }
+  return { changed, gone };
+}
+
+function prepareCity(city) {
+  const now = performance.now();
+  const full = now - lastFullAt >= 500;
+  if (full) lastFullAt = now;
+  const cars = thinList(city.cars, sentCars, full);
+  const junk = thinList(city.junk, sentJunk, full);
+  city.cars = cars.changed;
+  city.junk = junk.changed;
+  city.carGone = full ? [] : cars.gone;
+  city.junkGone = full ? [] : junk.gone;
+  city.full = full;
+  const layout = !sentSig || city.sig !== sentSig || now - sigAt >= 400;
+  city.layout = layout;
+  if (layout) {
+    sentSig = city.sig || '';
+    sigAt = now;
+  } else {
+    city.buildings = undefined;
+    city.drops = undefined;
+    city.cell = undefined;
+    city.hits = undefined;
+  }
+}
+
+function sendMeta() {
+  netSend({
+    t: 'meta',
+    score,
+    board: boardRows(),
+    challenge: challengeId,
+    by: challengeBy,
+    phase: challengePhase,
+    left: Math.max(0, challengePhase === 'count' || challengePhase === 'live' ? clockLeft() : challengeLeft),
+    result: challengeResult,
+    round: challengeRound,
+    ready: [...readyIds],
+    winners: winnerIds,
+    roster: challengePlayers().map((player) => ({ id: player.id, userId: player.userId || '', name: player.name })),
+  });
+}
+
+function takeMeta(data) {
+  if (Array.isArray(data.board)) applyRemoteBoard(data.board);
+  else if (typeof data.score === 'number') {
+    score = data.score;
+    if (started) updateScoreHud(false);
+  }
+  adoptChallenge(data);
+  refreshNetBadge();
+}
+
+function queueSnap(packet) {
+  const pending = netPending;
+  if (pending && pending.city && packet.city) {
+    if (pending.city.layout && !packet.city.layout) {
+      packet.city.buildings = pending.city.buildings;
+      packet.city.drops = pending.city.drops;
+      packet.city.cell = pending.city.cell;
+      packet.city.hits = pending.city.hits;
+      packet.city.layout = true;
+    }
+    if (pending.city.full && !packet.city.full) {
+      packet.city.cars = pending.city.cars;
+      packet.city.junk = pending.city.junk;
+      packet.city.carGone = [];
+      packet.city.junkGone = [];
+      packet.city.full = true;
+    }
+  }
+  netPending = packet;
+  pumpSnap();
+}
+
+function pumpSnap() {
+  if (!session || netBusy || !netPending) return;
+  const packet = netPending;
+  netPending = null;
+  let bytes;
   try {
-    const city = streetLevel() ? streets.capture() : null;
-    if (city) city.time = Math.round(simTime * 1000) / 1000;
-    packet = {
-      t: 'snap',
-      score,
-      board: boardRows(),
-      players: capturePlayers(),
-      city,
-      challenge: challengeId,
-      phase: challengePhase,
-      left: Math.max(0, challengePhase === 'count' || challengePhase === 'live' ? clockLeft() : challengeLeft),
-      result: challengeResult,
-      round: challengeRound,
-      ready: [...readyIds],
-      winners: winnerIds,
-      roster: challengePlayers().map((player) => ({ id: player.id, userId: player.userId || '', name: player.name })),
-    };
+    bytes = encodeSnap(packet);
   } catch (error) {
     console.error(error);
     return;
   }
-  if (netBusy) {
-    netPending = packet;
-    return;
-  }
-  flushNet(packet);
-}
-
-function flushNet(packet) {
-  if (!session) return;
   netBusy = true;
-  Promise.resolve(session.send(packet)).then(() => {
+  Promise.resolve(session.send(bytes)).then(() => {
     netBusy = false;
-    if (!netPending || !session) return;
-    const next = netPending;
-    netPending = null;
-    flushNet(next);
+    pumpSnap();
   }, (error) => {
     netBusy = false;
     netPending = null;
     console.error(error);
   });
-  refreshNetBadge();
+}
+
+function publishNet(dt) {
+  if (netRole !== 'host' || !started || !session) return;
+  metaAcc += dt;
+  if (metaAcc >= 0.25) {
+    metaAcc = 0;
+    sendMeta();
+  }
+  netAcc += dt;
+  const snap = 1 / 20;
+  if (netAcc < snap) return;
+  netAcc = Math.min(netAcc - snap, snap);
+  let packet;
+  try {
+    const city = streetLevel() ? streets.capture() : {
+      time: simTime,
+      sx: 0,
+      sz: 0,
+      tiles: [],
+      cars: [],
+      junk: [],
+      toys: null,
+      sig: '',
+    };
+    city.time = simTime;
+    prepareCity(city);
+    packet = { players: capturePlayers(), city };
+  } catch (error) {
+    console.error(error);
+    return;
+  }
+  queueSnap(packet);
+}
+
+function leadLocal(dt, gp) {
+  if (guestDrive || !ragdoll.walking()) {
+    leadX = 0;
+    leadZ = 0;
+    return;
+  }
+  const wish = !started || menuOpen ? { x: 0, z: 0 } : wishVector(gp);
+  const ahead = Math.min(0.1, Math.max(0, guestLag) * 0.55);
+  const tx = wish.x * 11 * ahead;
+  const tz = wish.z * 11 * ahead;
+  const blend = 1 - Math.exp(-16 * dt);
+  leadX += (tx - leadX) * blend;
+  leadZ += (tz - leadZ) * blend;
 }
 
 function angDelta(from, to) {
@@ -4139,7 +4277,8 @@ function samplePlayer(id, renderT) {
   while (samples.length >= 2 && samples[1].t <= renderT) samples.shift();
   const a = samples[0];
   if (samples.length < 2 || renderT <= a.t) {
-    const extra = samples.length < 2 ? Math.max(0, Math.min(0.08, renderT - a.t)) : 0;
+    const age = renderT - a.t;
+    const extra = samples.length < 2 && age > 0 && age < 0.1 ? age : 0;
     return {
       w: a.w,
       x: a.x + buf.vel.x * extra,
@@ -4204,6 +4343,10 @@ function applyPlayers(players, dt, hard, stamp) {
     }
     if (!doll) continue;
     if (pose.color) doll.recolor(pose.color);
+    if (mine && pose.echo) {
+      const lag = (performance.now() - pose.echo) / 1000;
+      if (lag > 0.02 && lag < 0.45) guestLag += (lag - guestLag) * 0.25;
+    }
     if (!mine && pose.name) labelDoll(doll, pose.name);
     if (stamp != null) pushPlayerSample(pose.id, stamp, pose, hard);
     const view = samplePlayer(pose.id, renderT);
@@ -4213,7 +4356,9 @@ function applyPlayers(players, dt, hard, stamp) {
         doll.setWalker(true);
         if (streetLevel()) doll.mover().material = streets.walkerMaterial();
       }
-      doll.plant(view.x, view.y, view.z);
+      const shiftX = mine && !pose.drive ? leadX : 0;
+      const shiftZ = mine && !pose.drive ? leadZ : 0;
+      doll.plant(view.x + shiftX, view.y, view.z + shiftZ);
       doll.poseWalker(view.yaw, view.phase || 0, view.gait || 0, dt, view.chop || 0);
     } else if (view.parts) doll.applyParts(view.parts);
   }
@@ -4257,7 +4402,7 @@ function sendInput(dt, gp) {
   const nest = guestNest;
   const drop = guestDrop;
   const swing = !menuOpen && streetLevel() && (swingHeld || gp.swing || keys.has('KeyE') || keys.has('Slash'));
-  const inputStep = 1 / 30;
+  const inputStep = 1 / 45;
   const inputDue = inputAcc >= inputStep;
   if (!jump && !nest && !drop && swing === sentSwing && !inputDue) return;
   inputAcc = inputDue ? Math.min(inputAcc - inputStep, inputStep) : 0;
@@ -4278,6 +4423,8 @@ function sendInput(dt, gp) {
     n: nest ? 1 : 0,
     s: swing ? 1 : 0,
     y: drop ? 1 : 0,
+    ready: iAmReady && challengePhase === 'ready' ? challengeRound : 0,
+    at: Math.round(performance.now()),
   });
 }
 
@@ -4313,11 +4460,15 @@ function stepGuest(dt) {
       const hostTime = streets.hostStamp();
       if (hostTime >= 0) stamp = hostTime;
     }
+  }
+  if (started && streetLevel()) streets.advance(dt);
+  leadLocal(dt, gp);
+  if (pendingSnap && started && streetLevel()) {
     applyPlayers(pendingSnap.players, dt, hard, stamp);
     streets.wearPlayers(pendingSnap.players, (id) => (id === selfPeerId ? ragdoll : guestDolls.get(id)));
   } else streets.wearPlayers([], () => null);
   if (started && streetLevel()) {
-    streets.glide(dt);
+    streets.glide();
     streets.tick(dt);
     streets.sync();
   }
@@ -4368,6 +4519,12 @@ function stepGuest(dt) {
 }
 
 function onNetMessage(data, peerId, userId) {
+  if (data instanceof Uint8Array) {
+    if (netRole !== 'guest') return;
+    const packet = decodeSnap(data);
+    if (packet) pendingSnap = packet;
+    return;
+  }
   if (!data || typeof data !== 'object') return;
   if (netRole === 'host') {
     const peer = roster.get(peerId);
@@ -4377,8 +4534,10 @@ function onNetMessage(data, peerId, userId) {
       pendingNames.set(peerId, name);
       if (peer) {
         peer.name = name;
+        peer.heard = true;
         if (peer.doll) labelDoll(peer.doll, peer.name);
         broadcastRoster();
+        if (challengePhase === 'ready') settleReady();
       }
       return;
     }
@@ -4392,15 +4551,22 @@ function onNetMessage(data, peerId, userId) {
       if (challengePhase !== 'ready') return;
       const round = Number(data.round);
       if (Number.isFinite(round) && round !== challengeRound) return;
-      acceptReady(data.id || peerId, userId || data.user || '');
+      const claimed = data.id || peerId;
+      markPeerReady(peerFromSignal(peerId, claimed, userId || data.user || ''));
       return;
     }
     if (!peer) return;
+    if (!peer.heard) {
+      peer.heard = true;
+      if (challengePhase === 'ready') settleReady();
+    }
     if (data.t === 'in') {
+      if (challengePhase === 'ready' && Number(data.ready) === challengeRound) markPeerReady(peer);
       peer.wishX = Number(data.x) || 0;
       peer.wishZ = Number(data.z) || 0;
       peer.ix = Number(data.ix) || 0;
       peer.iy = Number(data.iy) || 0;
+      if (data.at) peer.echo = data.at >>> 0;
       peer.flail = !!data.f;
       peer.swing = !!data.s;
       if (data.j) peer.jump = true;
@@ -4438,15 +4604,15 @@ function onNetMessage(data, peerId, userId) {
       ragdoll.recolor(myColor);
       closeMenu();
     }
+  } else if (data.t === 'meta') {
+    takeMeta(data);
   } else if (data.t === 'snap') {
-    pendingSnap = data;
-    adoptChallenge(data);
-    if (Array.isArray(data.board)) applyRemoteBoard(data.board);
-    else if (typeof data.score === 'number') {
-      score = data.score;
-      if (started) updateScoreHud(false);
+    if (data.city) {
+      data.city.full = true;
+      data.city.layout = true;
     }
-    refreshNetBadge();
+    pendingSnap = data;
+    takeMeta(data);
   } else if (data.t === 'fx' && started) playNetFx(data);
 }
 
@@ -4468,6 +4634,8 @@ function onPeerJoin(peerId, userId) {
     slot,
     color: FEATHERS[slot % FEATHERS.length],
     doll: null,
+    heard: false,
+    ready: false,
     wishX: 0,
     wishZ: 0,
     ix: 0,
@@ -4488,7 +4656,11 @@ function onPeerJoin(peerId, userId) {
     syncActors();
   }
   broadcastRoster();
-  if (started) netSend({ t: 'go' }, peerId);
+  if (started) {
+    lastFullAt = 0;
+    sentSig = '';
+    netSend({ t: 'go' }, peerId);
+  }
   judgeHarbor();
   if (started && challengePhase) broadcastRound();
   renderFriends();
@@ -4536,6 +4708,16 @@ async function leaveOnline() {
   lastPoseStamp = -1;
   shownSnap = null;
   netPending = null;
+  netBusy = false;
+  sentCars.clear();
+  sentJunk.clear();
+  sentSig = '';
+  sigAt = 0;
+  lastFullAt = 0;
+  metaAcc = 0;
+  guestLag = 0.08;
+  leadX = 0;
+  leadZ = 0;
   for (const peer of roster.values()) {
     if (peer.doll) peer.doll.dispose();
   }
